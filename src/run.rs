@@ -149,6 +149,11 @@ impl Frame {
                 Some(value) => value.invert(),
                 None => None,
             },
+            Operator::Gt => Some(left_value.gt(&right_value).into()),
+            Operator::GtE => Some(left_value.ge(&right_value).into()),
+            Operator::Lt => Some(left_value.lt(&right_value).into()),
+            Operator::LtE => Some(left_value.le(&right_value).into()),
+            Operator::Mod => left_value.modulo(&right_value),
             _ => return Err(format!("Operator {op:?} not yet implemented").into()),
         };
         match op_value {

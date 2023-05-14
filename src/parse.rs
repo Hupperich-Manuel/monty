@@ -206,7 +206,7 @@ fn parse_expression(expression: AstExpr) -> ParseResult<ParseExpr> {
             op: convert_compare_op(first(ops)?),
             right: Box::new(parse_expression(first(comparators)?)?),
         }),
-        ExprKind::Call { func, args, keywords } => {
+        ExprKind::Call { func, args, keywords: _ } => {
             let func = get_name(*func)?;
             let args = args.into_iter().map(parse_expression).collect::<ParseResult<_>>()?;
             // let kwargs = keywords

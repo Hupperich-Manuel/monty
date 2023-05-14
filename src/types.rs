@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,6 +140,36 @@ impl Default for Value {
     }
 }
 
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Int(s), Self::Int(o)) => s.partial_cmp(o),
+            (Self::Float(s), Self::Float(o)) => s.partial_cmp(o),
+            (Self::Int(s), Self::Float(o)) => (*s as f64).partial_cmp(o),
+            (Self::Float(s), Self::Int(o)) => s.partial_cmp(&(*o as f64)),
+            (Self::True, _) => Self::Int(1).partial_cmp(other),
+            (Self::False, _) => Self::Int(0).partial_cmp(other),
+            (_, Self::True) => self.partial_cmp(&Self::Int(1)),
+            (_, Self::False) => self.partial_cmp(&Self::Int(0)),
+            (Self::Str(s), Self::Str(o)) => s.partial_cmp(o),
+            (Self::Bytes(s), Self::Bytes(o)) => s.partial_cmp(o),
+            (Self::List(s), Self::List(o)) => s.partial_cmp(o),
+            (Self::Tuple(s), Self::Tuple(o)) => s.partial_cmp(o),
+            _ => None,
+        }
+    }
+}
+
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        if v {
+            Self::True
+        } else {
+            Self::False
+        }
+    }
+}
+
 impl Value {
     pub fn add(self, other: Self) -> Option<Self> {
         match (self, other) {
@@ -166,8 +197,8 @@ impl Value {
         match (self, other) {
             (Self::Undefined, _) => None,
             (_, Self::Undefined) => None,
-            (Self::Int(v1), Self::Int(v2)) => Self::_true_false(v1 == v2),
-            (Self::Str(v1), Self::Str(v2)) => Self::_true_false(v1 == v2),
+            (Self::Int(v1), Self::Int(v2)) => Some((v1 == v2).into()),
+            (Self::Str(v1), Self::Str(v2)) => Some((v1 == v2).into()),
             (Self::List(v1), Self::List(v2)) => {
                 if v1.len() != v2.len() {
                     Some(Self::False)
@@ -184,13 +215,13 @@ impl Value {
                     Some(Self::True)
                 }
             }
-            (Self::Range(v1), Self::Range(v2)) => Self::_true_false(v1 == v2),
+            (Self::Range(v1), Self::Range(v2)) => Some((v1 == v2).into()),
             (Self::True, Self::True) => Some(Self::True),
-            (Self::True, Self::Int(v2)) => Self::_true_false(1 == v2),
-            (Self::Int(v1), Self::True) => Self::_true_false(v1 == 1),
+            (Self::True, Self::Int(v2)) => Some((1 == v2).into()),
+            (Self::Int(v1), Self::True) => Some((v1 == 1).into()),
             (Self::False, Self::False) => Some(Self::True),
-            (Self::False, Self::Int(v2)) => Self::_true_false(0 == v2),
-            (Self::Int(v1), Self::False) => Self::_true_false(v1 == 0),
+            (Self::False, Self::Int(v2)) => Some((0 == v2).into()),
+            (Self::Int(v1), Self::False) => Some((v1 == 0).into()),
             (Self::None, Self::None) => Some(Self::True),
             _ => Some(Self::False),
         }
@@ -221,11 +252,13 @@ impl Value {
         }
     }
 
-    fn _true_false(v: bool) -> Option<Self> {
-        if v {
-            Some(Self::True)
-        } else {
-            Some(Self::False)
+    pub fn modulo(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 % v2)),
+            (Self::Float(v1), Self::Float(v2)) => Some(Self::Float(v1 % v2)),
+            (Self::Float(v1), Self::Int(v2)) => Some(Self::Float(v1 % (*v2 as f64))),
+            (Self::Int(v1), Self::Float(v2)) => Some(Self::Float((*v1 as f64) % v2)),
+            _ => None,
         }
     }
 }
