@@ -50,13 +50,13 @@ fn add_two_cpython(bench: &mut Bencher) {
     });
 }
 
-const LOOP_MOD_13_CODE: &str = r#"
+const LOOP_MOD_13_CODE: &str = "
 v = ''
 for i in range(100):
     if i % 13 == 0:
         v += 'x'
 len(v)
-"#;
+";
 
 #[bench]
 fn loop_mod_13(bench: &mut Bencher) {
@@ -97,6 +97,30 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
         assert_eq!(r, 8);
 
         bench.iter(|| {
+            let r_py = fun.call0(py).unwrap();
+            let r: i64 = r_py.extract(py).unwrap();
+            black_box(r);
+        });
+    });
+}
+
+#[bench]
+fn end_to_end(bench: &mut Bencher) {
+    bench.iter(|| {
+        let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
+        black_box(ex.run(vec![]).unwrap());
+    });
+}
+
+#[bench]
+fn end_to_end_cpython(bench: &mut Bencher) {
+    Python::with_gil(|py| {
+        bench.iter(|| {
+            let fun: PyObject = PyModule::from_code(py, black_box("def main():\n  return 1 + 2"), "test.py", "main")
+                .unwrap()
+                .getattr("main")
+                .unwrap()
+                .into();
             let r_py = fun.call0(py).unwrap();
             let r: i64 = r_py.extract(py).unwrap();
             black_box(r);
