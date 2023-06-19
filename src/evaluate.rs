@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 
-use crate::exceptions::exc_err;
-use crate::exceptions::{Exception, InternalRunError};
+use crate::exceptions::{internal_err, ExcType, Exception, InternalRunError};
+use crate::expressions::{Expr, ExprLoc, Function, Kwarg};
 use crate::object::Object;
 use crate::operators::{CmpOperator, Operator};
 use crate::run::RunResult;
-use crate::types::{Expr, ExprLoc, Function, Kwarg};
 
 pub(crate) struct Evaluator<'d> {
     namespace: &'d [Object],
@@ -27,7 +26,8 @@ impl<'d> Evaluator<'d> {
                     }
                 } else {
                     let name = ident.name.clone();
-                    Err(Exception::NameError(name.into())
+
+                    Err(Exception::new(name, ExcType::NameError)
                         .with_position(expr_loc.position)
                         .into())
                 }
@@ -64,7 +64,7 @@ impl<'d> Evaluator<'d> {
             Operator::Add => left_object.add(&right_object),
             Operator::Sub => left_object.sub(&right_object),
             Operator::Mod => left_object.modulus(&right_object),
-            _ => return exc_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
+            _ => return internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
         };
         match op_object {
             Some(object) => Ok(Cow::Owned(object)),
@@ -86,7 +86,7 @@ impl<'d> Evaluator<'d> {
                 Some(b) => Ok(b),
                 None => Exception::operand_type_error(left, Operator::Mod, right, left_object, right_object),
             },
-            _ => exc_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
+            _ => internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
         }
     }
 
@@ -99,7 +99,7 @@ impl<'d> Evaluator<'d> {
         let builtin = match function {
             Function::Builtin(builtin) => builtin,
             Function::Ident(_) => {
-                return exc_err!(InternalRunError::TodoError; "User defined functions not yet implemented")
+                return internal_err!(InternalRunError::TodoError; "User defined functions not yet implemented")
             }
         };
         builtin.call_function(self, args, kwargs)

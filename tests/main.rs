@@ -69,7 +69,7 @@ macro_rules! execute_raise_tests {
                 fn [< execute_raise_ $name >]() {
                     let ex = Executor::new($code, "test.py", &[]).unwrap();
                     let output = match ex.run(vec![]) {
-                        Ok(Exit::Raise(exc_raise)) => format!("{:?}", exc_raise.exc),
+                        Ok(Exit::Raise(exc_raise)) => format!("{}", exc_raise.exc.repr()),
                         otherwise => panic!("Unexpected raise: {:?}", otherwise),
                     };
                     let expected = $expected_exc.trim_matches('\n');
@@ -82,11 +82,13 @@ macro_rules! execute_raise_tests {
 
 execute_raise_tests! {
     // language=Python
-    type_error_instance: "
-raise TypeError('testing')
-", r#"TypeError("testing")"#;
-//     // language=Python
-//     type_error_type: "
-// raise TypeError
-// ", "TypeError";
+    error_instance_str: "raise ValueError('testing')", "ValueError('testing')";
+    // language=Python
+    raise_number: "raise 1 + 2", "TypeError('exceptions must derive from BaseException')";
+    // language=Python
+    error_type: "raise TypeError", "TypeError()";
+    // language=Python
+    error_no_args: "raise TypeError()", "TypeError()";
+    // language=Python
+    error_two_args: "raise ValueError('x', 1 + 2)", "ValueError('x', 3)";
 }

@@ -2,13 +2,13 @@ use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
 
-use crate::builtins::Builtins;
 use crate::evaluate::Evaluator;
-use crate::exceptions::exc_err;
+use crate::exceptions::internal_err;
+use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::object::Object;
+use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
-use crate::types::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 
 pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, (Vec<Object>, Vec<Node<'c>>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
@@ -74,7 +74,7 @@ impl Prepare {
                                     // this is raising an exception type, e.g. `raise TypeError`
                                     // TODO we need a proper type system here
                                     let expr = Expr::Call {
-                                        func: Function::Builtin(Builtins::find(&id.name)?),
+                                        func: Function::Builtin(Types::find(&id.name)?),
                                         args: vec![],
                                         kwargs: vec![],
                                     };
@@ -83,7 +83,7 @@ impl Prepare {
                                 _ => Some(self.prepare_expression(expr)?),
                             }
                         }
-                        None => return exc_err!(ParseError::Internal; "naked `raise` is not yet supported"),
+                        None => None,
                     };
                     new_nodes.push(Node::Raise(expr));
                 }
@@ -157,10 +157,10 @@ impl Prepare {
                 let ident = match func {
                     Function::Ident(ident) => ident,
                     Function::Builtin(_) => {
-                        return exc_err!(ParseError::Internal; "Call prepare expected an identifier")
+                        return internal_err!(ParseError::Internal; "Call prepare expected an identifier")
                     }
                 };
-                let func = Function::Builtin(Builtins::find(&ident.name)?);
+                let func = Function::Builtin(Types::find(&ident.name)?);
                 Expr::Call {
                     func,
                     args: args

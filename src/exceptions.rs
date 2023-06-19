@@ -1,41 +1,100 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::expressions::ExprLoc;
 use crate::object::Object;
 use crate::parse::CodeRange;
 use crate::run::RunResult;
-use crate::types::ExprLoc;
 
 #[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExcType {
+    ValueError,
+    TypeError,
+    NameError,
+}
+
+impl fmt::Display for ExcType {
+    // TODO replace with a strum
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.str())
+    }
+}
+
+impl ExcType {
+    fn str(&self) -> &'static str {
+        match self {
+            Self::ValueError => "ValueError",
+            Self::TypeError => "TypeError",
+            Self::NameError => "NameError",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Exception {
-    ValueError(Cow<'static, str>),
-    TypeError(Cow<'static, str>),
-    NameError(Cow<'static, str>),
+pub struct Exception {
+    exc_type: ExcType,
+    args: Vec<Object>,
 }
 
 impl fmt::Display for Exception {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ValueError(s) => write!(f, "{s}"),
-            Self::TypeError(s) => write!(f, "{s}"),
-            Self::NameError(s) => write!(f, "{s}"),
+        // different output for no args, 1 arg, and more than 1 args
+        let mut args_iter = self.args.iter();
+        if let Some(first_arg) = args_iter.next() {
+            if let Some(second_arg) = args_iter.next() {
+                // more than one arg, print as tuple
+                write!(f, "({}, {}", first_arg.repr(), second_arg.repr())?;
+                for arg in args_iter {
+                    write!(f, ", {}", arg.repr())?;
+                }
+                write!(f, ")")
+            } else {
+                // one arg, simply return it
+                write!(f, "{first_arg}")
+            }
+        } else {
+            // no args, nothing is printed
+            Ok(())
         }
     }
 }
 
 impl Exception {
-    pub(crate) fn str_with_type(&self) -> String {
-        format!("{}: {self}", self.type_str())
+    pub(crate) fn new(s: String, exc_type: ExcType) -> Self {
+        Exception {
+            exc_type,
+            args: vec![Object::Str(s)],
+        }
     }
 
-    // TODO should also be replaced by ObjectType enum
+    pub(crate) fn call(args: Vec<Object>, exc_type: ExcType) -> Self {
+        Exception { exc_type, args }
+    }
+
+    pub(crate) fn str_with_type(&self) -> String {
+        format!("{}: {self}", self.exc_type)
+    }
+
     pub(crate) fn type_str(&self) -> &'static str {
-        match self {
-            Self::ValueError(_) => "ValueError",
-            Self::TypeError(_) => "TypeError",
-            Self::NameError(_) => "NameError",
+        self.exc_type.str()
+    }
+
+    pub fn repr(&self) -> String {
+        // TODO would this be noticeably faster if it operated on an iterable?
+        let mut s = self.exc_type.to_string();
+        s.push('(');
+
+        let mut args_iter = self.args.iter();
+        if let Some(first) = args_iter.next() {
+            s.push_str(&first.repr());
+            for arg in args_iter {
+                s.push_str(", ");
+                s.push_str(&arg.repr());
+            }
         }
+        s.push(')');
+        s
     }
 
     pub(crate) fn with_frame(self, frame: StackFrame) -> ExceptionRaise {
@@ -63,7 +122,7 @@ impl Exception {
         let right_type = right_object.type_str();
         let new_position = left.position.extend(&right.position);
         Err(
-            exc!(Exception::TypeError; "unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
+            exc!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
                 .with_position(new_position)
                 .into(),
         )
@@ -72,10 +131,10 @@ impl Exception {
 
 macro_rules! exc {
     ($error_type:expr; $msg:tt) => {
-        $error_type(format!($msg).into())
+        crate::exceptions::Exception::new(format!($msg), $error_type)
     };
     ($error_type:expr; $msg:tt, $( $msg_args:expr ),+ ) => {
-        $error_type(format!($msg, $( $msg_args ),+).into())
+        crate::exceptions::Exception::new(format!($msg, $( $msg_args ),+), $error_type)
     };
 }
 pub(crate) use exc;
@@ -166,6 +225,26 @@ pub enum InternalRunError {
     // could be NameError, but we don't always have the name
     Undefined(Cow<'static, str>),
 }
+
+macro_rules! internal_error {
+    ($error_type:expr; $msg:tt) => {
+        $error_type(format!($msg).into())
+    };
+    ($error_type:expr; $msg:tt, $( $msg_args:expr ),+ ) => {
+        $error_type(format!($msg, $( $msg_args ),+).into())
+    };
+}
+pub(crate) use internal_error;
+
+macro_rules! internal_err {
+    ($error_type:expr; $msg:tt) => {
+        Err(crate::exceptions::internal_error!($error_type; $msg).into())
+    };
+    ($error_type:expr; $msg:tt, $( $msg_args:expr ),+ ) => {
+        Err(crate::exceptions::internal_error!($error_type; $msg, $( $msg_args ),+).into())
+    };
+}
+pub(crate) use internal_err;
 
 impl fmt::Display for InternalRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
 use crate::evaluate::Evaluator;
-use crate::exceptions::{exc, exc_err, Exception, InternalRunError, RunError, StackFrame};
+use crate::exceptions::{exc, exc_err, internal_err, ExcType, Exception, InternalRunError, RunError, StackFrame};
+use crate::expressions::{Exit, ExprLoc, Identifier, Node};
 use crate::object::Object;
 use crate::operators::Operator;
 use crate::parse::CodeRange;
-use crate::types::{Exit, ExprLoc, Identifier, Node};
 
 pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 
@@ -36,7 +36,7 @@ impl<'c> RunFrame<'c> {
 
     fn execute_node(&mut self, node: &Node<'c>) -> RunResult<'c, Option<Exit<'c>>> {
         match node {
-            Node::Pass => return exc_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
+            Node::Pass => return internal_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
             Node::Expr(expr) => {
                 self.execute_expr(expr)?;
             }
@@ -86,11 +86,11 @@ impl<'c> RunFrame<'c> {
             let object = self.execute_expr(exc_expr)?;
             let exc = match object.into_owned() {
                 Object::Exc(exc) => exc,
-                _ => return exc_err!(Exception::TypeError; "exceptions must derive from BaseException"),
+                _ => return exc_err!(ExcType::TypeError; "exceptions must derive from BaseException"),
             };
             Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into())
         } else {
-            exc_err!(InternalRunError::TodoError; "plain raise not yet supported")
+            internal_err!(InternalRunError::TodoError; "plain raise not yet supported")
         }
     }
 
@@ -105,18 +105,18 @@ impl<'c> RunFrame<'c> {
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {
                 Operator::Add => target_object.add_mut(right_object),
-                _ => return exc_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
+                _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
             };
             if let Err(right) = r {
                 let target_type = target_object.to_string();
                 let right_type = right.to_string();
-                let e = exc!(Exception::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
+                let e = exc!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
                 Err(e.with_frame(self.stack_frame(&expr.position)).into())
             } else {
                 Ok(())
             }
         } else {
-            let e = Exception::NameError(target.name.to_string().into());
+            let e = Exception::new(target.name.to_string(), ExcType::NameError);
             Err(e.with_frame(self.stack_frame(&target.position)).into())
         }
     }
@@ -130,7 +130,7 @@ impl<'c> RunFrame<'c> {
     ) -> RunResult<'c, ()> {
         let range_size = match self.execute_expr(iter)?.as_ref() {
             Object::Range(s) => *s,
-            _ => return exc_err!(InternalRunError::TodoError; "`for` iter must be a range"),
+            _ => return internal_err!(InternalRunError::TodoError; "`for` iter must be a range"),
         };
 
         for object in 0i64..range_size {

@@ -6,10 +6,10 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::parse_program;
 
+use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::object::Object;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
-use crate::types::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 
 pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> ParseResult<'c, Vec<Node<'c>>> {
     match parse_program(code, filename) {

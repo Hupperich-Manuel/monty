@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::exceptions::{exc_err, Exception, RunError};
+use crate::exceptions::{exc_err, ExcType, Exception, RunError};
 use crate::run::RunResult;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,8 +193,9 @@ impl Object {
     pub fn repr(&self) -> String {
         // TODO these need to match python escaping
         match self {
-            Self::Str(v) => format!("\"{v}\""),
+            Self::Str(v) => format!("'{v}'"),
             Self::Bytes(v) => format!("b\"{v:?}\""),
+            Self::Exc(exc) => exc.repr(),
             _ => self.to_string(),
         }
     }
@@ -204,7 +205,7 @@ impl Object {
         match self {
             Self::Int(i) => Ok(*i),
             // TODO use self.type
-            _ => exc_err!(Exception::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
+            _ => exc_err!(ExcType::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
         }
     }
 
@@ -234,7 +235,7 @@ impl TryFrom<Object> for String {
     fn try_from(object: Object) -> RunResult<'static, Self> {
         match object {
             Object::Str(s) => Ok(s),
-            _ => exc_err!(Exception::TypeError; "'{object:?}' object is not a str"),
+            _ => exc_err!(ExcType::TypeError; "'{object:?}' object is not a str"),
         }
     }
 }

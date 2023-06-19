@@ -2,8 +2,8 @@ use std::fmt;
 
 use crate::exceptions::ExceptionRaise;
 
-use crate::builtins::Builtins;
 use crate::object::Object;
+use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
 
@@ -28,7 +28,7 @@ pub(crate) struct Kwarg<'c> {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Function<'c> {
-    Builtin(Builtins),
+    Builtin(Types),
     Ident(Identifier<'c>),
 }
 
