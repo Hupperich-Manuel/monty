@@ -17,6 +17,8 @@ rustpython-parser = { git = "https://github.com/charliermarsh/RustPython.git", r
 ahash = "0.8.0"
 num = "0.4.0"
 mimalloc = "0.1.30"
+#strum = { version = "0.25", features = ["derive"] }
+#strum_macros = "0.25"
 
 [dev-dependencies]
 paste = "1.0.7"

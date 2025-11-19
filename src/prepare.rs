@@ -2,13 +2,13 @@ use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
 
-use crate::builtins::Builtins;
-use crate::evaluate::Evaluator;
-use crate::exceptions::exc_err;
+use crate::evaluate::evaluate;
+use crate::exceptions::{internal_err, ExcType, Exception, ExceptionRaise};
+use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::object::Object;
+use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
-use crate::types::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 
 pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, (Vec<Object>, Vec<Node<'c>>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
@@ -66,6 +66,26 @@ impl Prepare {
                     new_nodes.push(Node::Return(expr));
                 }
                 Node::ReturnNone => new_nodes.push(Node::ReturnNone),
+                Node::Raise(exc) => {
+                    let expr = match exc {
+                        Some(expr) => {
+                            match expr.expr {
+                                Expr::Name(id) => {
+                                    // this is raising an exception type, e.g. `raise TypeError`
+                                    let expr = Expr::Call {
+                                        func: Function::Builtin(Types::find(&id.name)?),
+                                        args: vec![],
+                                        kwargs: vec![],
+                                    };
+                                    Some(ExprLoc::new(id.position, expr))
+                                }
+                                _ => Some(self.prepare_expression(expr)?),
+                            }
+                        }
+                        None => None,
+                    };
+                    new_nodes.push(Node::Raise(expr));
+                }
                 Node::Assign { target, object } => {
                     let object = self.prepare_expression(object)?;
                     let (target, is_new) = self.get_id(target);
@@ -136,20 +156,30 @@ impl Prepare {
                 let ident = match func {
                     Function::Ident(ident) => ident,
                     Function::Builtin(_) => {
-                        return exc_err!(ParseError::Internal; "Call prepare expected an identifier")
+                        return internal_err!(ParseError::Internal; "Call prepare expected an identifier")
                     }
                 };
-                let func = Function::Builtin(Builtins::find(&ident.name)?);
-                Expr::Call {
-                    func,
-                    args: args
-                        .into_iter()
-                        .map(|e| self.prepare_expression(e))
-                        .collect::<ParseResult<_>>()?,
-                    kwargs: kwargs
-                        .into_iter()
-                        .map(|kwarg| self.prepare_kwarg(kwarg))
-                        .collect::<ParseResult<_>>()?,
+                let func = Function::Builtin(Types::find(&ident.name)?);
+                let (args, kwargs) = self.get_args_kwargs(args, kwargs)?;
+                Expr::Call { func, args, kwargs }
+            }
+            Expr::AttrCall {
+                object,
+                attr,
+                args,
+                kwargs,
+            } => {
+                let (object, is_new) = self.get_id(object);
+                if is_new {
+                    let exc: ExceptionRaise = Exception::new(object.name, ExcType::NameError).into();
+                    return Err(exc.into());
+                }
+                let (args, kwargs) = self.get_args_kwargs(args, kwargs)?;
+                Expr::AttrCall {
+                    object,
+                    attr,
+                    args,
+                    kwargs,
                 }
             }
             Expr::List(elements) => {
@@ -189,9 +219,8 @@ impl Prepare {
         let consts: Option<&[bool]> = if self.hit_loop { None } else { Some(&self.consts) };
 
         if can_be_const(&expr, consts) {
-            let evaluate = Evaluator::new(&self.namespace);
             let tmp_expr_loc = ExprLoc { position, expr };
-            let object = evaluate.evaluate(&tmp_expr_loc)?;
+            let object = evaluate(&mut self.namespace, &tmp_expr_loc)?;
             Ok(ExprLoc {
                 position,
                 expr: Expr::Constant(object.into_owned()),
@@ -234,6 +263,22 @@ impl Prepare {
             is_new,
         )
     }
+
+    fn get_args_kwargs<'c>(
+        &mut self,
+        args: Vec<ExprLoc<'c>>,
+        kwargs: Vec<Kwarg<'c>>,
+    ) -> ParseResult<'c, (Vec<ExprLoc<'c>>, Vec<Kwarg<'c>>)> {
+        let args = args
+            .into_iter()
+            .map(|e| self.prepare_expression(e))
+            .collect::<ParseResult<_>>()?;
+        let kwargs = kwargs
+            .into_iter()
+            .map(|kwarg| self.prepare_kwarg(kwarg))
+            .collect::<ParseResult<_>>()?;
+        Ok((args, kwargs))
+    }
 }
 
 /// whether an expression can be evaluated to a constant
@@ -249,6 +294,7 @@ fn can_be_const(expr: &Expr, consts: Option<&[bool]>) -> bool {
                 && args.iter().all(|arg| can_be_const(&arg.expr, consts))
                 && kwargs.iter().all(|kwarg| can_be_const(&kwarg.value.expr, consts))
         }
+        Expr::AttrCall { .. } => false,
         Expr::Op { left, op: _, right } => can_be_const(&left.expr, consts) && can_be_const(&right.expr, consts),
         Expr::CmpOp { left, op: _, right } => can_be_const(&left.expr, consts) && can_be_const(&right.expr, consts),
         Expr::List(elements) => elements.iter().all(|el| can_be_const(&el.expr, consts)),
