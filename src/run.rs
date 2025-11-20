@@ -42,7 +42,7 @@ impl<'c> RunFrame<'c> {
             }
             Node::Return(expr) => return Ok(Some(Exit::Return(self.execute_expr(expr)?.into_owned()))),
             Node::ReturnNone => return Ok(Some(Exit::ReturnNone)),
-            Node::Raise(exc) => self.raise(exc)?,
+            Node::Raise(exc) => self.raise(exc.as_ref())?,
             Node::Assign { target, object } => {
                 self.assign(target, object)?;
             }
@@ -56,7 +56,7 @@ impl<'c> RunFrame<'c> {
                 or_else,
             } => self.for_loop(target, iter, body, or_else)?,
             Node::If { test, body, or_else } => self.if_(test, body, or_else)?,
-        };
+        }
         Ok(None)
     }
 
@@ -81,14 +81,13 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn raise(&mut self, op_exc_expr: &Option<ExprLoc<'c>>) -> RunResult<'c, ()> {
+    fn raise(&mut self, op_exc_expr: Option<&ExprLoc<'c>>) -> RunResult<'c, ()> {
         if let Some(exc_expr) = op_exc_expr {
             let object = self.execute_expr(exc_expr)?;
-            let exc = match object.into_owned() {
-                Object::Exc(exc) => exc,
-                _ => return exc_err!(ExcType::TypeError; "exceptions must derive from BaseException"),
-            };
-            Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into())
+            match object.into_owned() {
+                Object::Exc(exc) => Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into()),
+                _ => exc_err!(ExcType::TypeError; "exceptions must derive from BaseException"),
+            }
         } else {
             internal_err!(InternalRunError::TodoError; "plain raise not yet supported")
         }
@@ -150,7 +149,7 @@ impl<'c> RunFrame<'c> {
     }
 
     fn stack_frame(&self, position: &CodeRange<'c>) -> StackFrame<'c> {
-        StackFrame::new(position, self.name, &self.parent)
+        StackFrame::new(position, self.name, self.parent.as_ref())
     }
 }
 

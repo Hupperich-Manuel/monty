@@ -80,16 +80,16 @@ impl Types {
                 }
             }
             Self::Exceptions(exc_type) => {
-                let args: Vec<Object> = args.into_iter().map(|a| a.into_owned()).collect();
+                let args: Vec<Object> = args.into_iter().map(std::borrow::Cow::into_owned).collect();
                 Ok(Cow::Owned(Object::Exc(Exception::call(args, *exc_type))))
             }
             Self::Range => {
-                if args.len() != 1 {
-                    internal_err!(InternalRunError::TodoError; "range() takes exactly one argument")
-                } else {
+                if args.len() == 1 {
                     let object = &args[0];
                     let size = object.as_int()?;
                     Ok(Cow::Owned(Object::Range(size)))
+                } else {
+                    internal_err!(InternalRunError::TodoError; "range() takes exactly one argument")
                 }
             }
         }

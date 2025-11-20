@@ -33,7 +33,7 @@ impl Prepare {
     fn new(capacity: usize, input_names: &[&str], root_frame: bool) -> Self {
         let mut name_map = AHashMap::with_capacity(capacity);
         for (index, name) in input_names.iter().enumerate() {
-            name_map.insert(name.to_string(), index);
+            name_map.insert((*name).to_string(), index);
         }
         let namespace = vec![Object::Undefined; name_map.len()];
         let consts = vec![false; name_map.len()];
@@ -116,7 +116,7 @@ impl Prepare {
                         iter: self.prepare_expression(iter)?,
                         body: self.prepare_nodes(body)?,
                         or_else: self.prepare_nodes(or_else)?,
-                    })
+                    });
                 }
                 Node::If { test, body, or_else } => {
                     let test = self.prepare_expression(test)?;
@@ -129,7 +129,7 @@ impl Prepare {
                             new_nodes.extend(or_else);
                         }
                     } else {
-                        new_nodes.push(Node::If { test, body, or_else })
+                        new_nodes.push(Node::If { test, body, or_else });
                     }
                 }
             }

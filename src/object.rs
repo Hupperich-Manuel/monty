@@ -86,6 +86,7 @@ impl From<bool> for Object {
 }
 
 impl Object {
+    #[must_use]
     pub fn add(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
@@ -115,6 +116,7 @@ impl Object {
         Ok(())
     }
 
+    #[must_use]
     pub fn sub(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 - v2)),
@@ -123,6 +125,7 @@ impl Object {
     }
 
     /// different name to avoid confusion with `PartialEq::eq`
+    #[must_use]
     pub fn py_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Undefined, _) => false,
@@ -143,6 +146,7 @@ impl Object {
         }
     }
 
+    #[must_use]
     pub fn bool(&self) -> bool {
         match self {
             Self::Undefined => false,
@@ -161,6 +165,7 @@ impl Object {
         }
     }
 
+    #[must_use]
     pub fn modulus(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 % v2)),
@@ -171,6 +176,7 @@ impl Object {
         }
     }
 
+    #[must_use]
     pub fn modulus_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(v1 % v2 == right_value),
@@ -182,6 +188,7 @@ impl Object {
     }
 
     #[allow(clippy::len_without_is_empty)]
+    #[must_use]
     pub fn len(&self) -> Option<usize> {
         match self {
             Self::Str(v) => Some(v.len()),
@@ -192,6 +199,7 @@ impl Object {
         }
     }
 
+    #[must_use]
     pub fn repr(&self) -> String {
         // TODO these need to match python escaping
         match self {
@@ -212,6 +220,7 @@ impl Object {
     }
 
     // TODO this should be replaced by a proper ObjectType enum
+    #[must_use]
     pub fn type_str(&self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -238,20 +247,20 @@ impl Object {
         match (self, attr) {
             (Self::List(v), Attr::Foobar) => Ok(Cow::Owned(Object::Int(v.len() as i64))),
             (Self::List(v), Attr::Append) => {
-                if args.len() != 1 {
-                    exc_err!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
-                } else {
+                if args.len() == 1 {
                     v.push(args[0].clone().into_owned());
                     Ok(Cow::Owned(Self::None))
+                } else {
+                    exc_err!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
                 }
             }
             (Self::List(v), Attr::Insert) => {
-                if args.len() != 2 {
-                    exc_err!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())
-                } else {
+                if args.len() == 2 {
                     let index = args[0].as_int()? as usize;
                     v.insert(index, args[1].clone().into_owned());
                     Ok(Cow::Owned(Self::None))
+                } else {
+                    exc_err!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())
                 }
             }
             (s, _) => exc_err!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", s.type_str()),
@@ -260,15 +269,15 @@ impl Object {
 }
 
 fn vecs_equal(v1: &[Object], v2: &[Object]) -> bool {
-    if v1.len() != v2.len() {
-        false
-    } else {
+    if v1.len() == v2.len() {
         for (v1, v2) in v1.iter().zip(v2.iter()) {
             if !v1.py_eq(v2) {
                 return false;
             }
         }
         true
+    } else {
+        false
     }
 }
 

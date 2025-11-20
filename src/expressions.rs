@@ -33,7 +33,7 @@ pub(crate) enum Function<'c> {
     Ident(Identifier<'c>),
 }
 
-impl<'c> fmt::Display for Function<'c> {
+impl fmt::Display for Function<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Builtin(b) => write!(f, "{b}"),
@@ -42,12 +42,12 @@ impl<'c> fmt::Display for Function<'c> {
     }
 }
 
-impl<'c> Function<'c> {
+impl Function<'_> {
     /// whether the function has side effects
     pub fn side_effects(&self) -> bool {
         match self {
             Self::Builtin(b) => b.side_effects(),
-            _ => true,
+            Self::Ident(_) => true,
         }
     }
 }
@@ -81,7 +81,7 @@ pub(crate) enum Expr<'c> {
     List(Vec<ExprLoc<'c>>),
 }
 
-impl<'c> fmt::Display for Expr<'c> {
+impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Constant(object) => write!(f, "{}", object.repr()),
@@ -100,7 +100,7 @@ impl<'c> fmt::Display for Expr<'c> {
             Self::CmpOp { left, op, right } => write!(f, "{left} {op} {right}"),
             Self::List(list) => {
                 write!(f, "[")?;
-                for item in list.iter() {
+                for item in list {
                     write!(f, "{item}, ")?;
                 }
                 write!(f, "]")
@@ -143,7 +143,7 @@ impl<'c> Expr<'c> {
             pos_args = true;
         }
         if pos_args {
-            for kwarg in kwargs.iter() {
+            for kwarg in kwargs {
                 write!(f, ", {}={}", kwarg.key.name, kwarg.value)?;
             }
         } else {
@@ -165,7 +165,7 @@ pub(crate) struct ExprLoc<'c> {
     pub expr: Expr<'c>,
 }
 
-impl<'c> fmt::Display for ExprLoc<'c> {
+impl fmt::Display for ExprLoc<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // don't show position as that should be displayed separately
         write!(f, "{}", self.expr)
@@ -217,7 +217,7 @@ pub enum Exit<'c> {
     Raise(ExceptionRaise<'c>),
 }
 
-impl<'c> fmt::Display for Exit<'c> {
+impl fmt::Display for Exit<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReturnNone => write!(f, "None"),

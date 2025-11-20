@@ -24,7 +24,7 @@ impl fmt::Display for ExcType {
 
 impl ExcType {
     // TODO replace with a strum
-    fn str(&self) -> &'static str {
+    fn str(self) -> &'static str {
         match self {
             Self::ValueError => "ValueError",
             Self::TypeError => "TypeError",
@@ -159,7 +159,7 @@ pub struct ExceptionRaise<'c> {
     pub(crate) frame: Option<StackFrame<'c>>,
 }
 
-impl<'c> fmt::Display for ExceptionRaise<'c> {
+impl fmt::Display for ExceptionRaise<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref frame) = self.frame {
             writeln!(f, "Traceback (most recent call last):")?;
@@ -169,13 +169,13 @@ impl<'c> fmt::Display for ExceptionRaise<'c> {
     }
 }
 
-impl<'c> From<Exception> for ExceptionRaise<'c> {
+impl From<Exception> for ExceptionRaise<'_> {
     fn from(exc: Exception) -> Self {
         ExceptionRaise { exc, frame: None }
     }
 }
 
-impl<'c> ExceptionRaise<'c> {
+impl ExceptionRaise<'_> {
     pub(crate) fn summary(&self) -> String {
         let exc = self.exc.str_with_type();
         if let Some(ref frame) = self.frame {
@@ -193,7 +193,7 @@ pub struct StackFrame<'c> {
     pub(crate) parent: Option<Box<StackFrame<'c>>>,
 }
 
-impl<'c> fmt::Display for StackFrame<'c> {
+impl fmt::Display for StackFrame<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref parent) = self.parent {
             write!(f, "{parent}")?;
@@ -204,11 +204,11 @@ impl<'c> fmt::Display for StackFrame<'c> {
 }
 
 impl<'c> StackFrame<'c> {
-    pub(crate) fn new(position: &CodeRange<'c>, frame_name: &'c str, parent: &Option<StackFrame<'c>>) -> Self {
+    pub(crate) fn new(position: &CodeRange<'c>, frame_name: &'c str, parent: Option<&StackFrame<'c>>) -> Self {
         Self {
             position: *position,
             frame_name: Some(frame_name),
-            parent: parent.clone().map(Box::new),
+            parent: parent.map(|parent| Box::new(parent.clone())),
         }
     }
 
@@ -254,10 +254,13 @@ impl fmt::Display for InternalRunError {
         match self {
             Self::Error(s) => write!(f, "Internal Error: {s}"),
             Self::TodoError(s) => write!(f, "Internal Error TODO: {s}"),
-            Self::Undefined(s) => match s.is_empty() {
-                true => write!(f, "Internal Error: accessing undefined object"),
-                false => write!(f, "Internal Error: accessing undefined object `{s}`"),
-            },
+            Self::Undefined(s) => {
+                if s.is_empty() {
+                    write!(f, "Internal Error: accessing undefined object")
+                } else {
+                    write!(f, "Internal Error: accessing undefined object `{s}`")
+                }
+            }
         }
     }
 }
@@ -268,7 +271,7 @@ pub enum RunError<'c> {
     Exc(ExceptionRaise<'c>),
 }
 
-impl<'c> fmt::Display for RunError<'c> {
+impl fmt::Display for RunError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Internal(s) => write!(f, "{s}"),
@@ -277,7 +280,7 @@ impl<'c> fmt::Display for RunError<'c> {
     }
 }
 
-impl<'c> From<InternalRunError> for RunError<'c> {
+impl From<InternalRunError> for RunError<'_> {
     fn from(internal_error: InternalRunError) -> Self {
         Self::Internal(internal_error)
     }
@@ -289,7 +292,7 @@ impl<'c> From<ExceptionRaise<'c>> for RunError<'c> {
     }
 }
 
-impl<'c> From<Exception> for RunError<'c> {
+impl From<Exception> for RunError<'_> {
     fn from(exc: Exception) -> Self {
         Self::Exc(exc.into())
     }

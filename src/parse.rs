@@ -170,7 +170,11 @@ impl<'c> Parser<'c> {
     }
 
     fn parse_expression(&self, expression: AstExpr) -> ParseResult<'c, ExprLoc<'c>> {
-        let AstExpr { node, range, custom: _ } = expression;
+        let AstExpr {
+            node,
+            range,
+            custom: (),
+        } = expression;
         match node {
             ExprKind::BoolOp { op, values } => {
                 if values.len() != 2 {
@@ -180,7 +184,7 @@ impl<'c> Parser<'c> {
                 let left = Box::new(self.parse_expression(values.next().unwrap())?);
                 let right = Box::new(self.parse_expression(values.next().unwrap())?);
                 Ok(ExprLoc {
-                    position: self.convert_range(&range),
+                    position: self.convert_range(range),
                     expr: Expr::Op {
                         left,
                         op: convert_bool_op(op),
@@ -193,7 +197,7 @@ impl<'c> Parser<'c> {
                 let left = Box::new(self.parse_expression(*left)?);
                 let right = Box::new(self.parse_expression(*right)?);
                 Ok(ExprLoc {
-                    position: self.convert_range(&range),
+                    position: self.convert_range(range),
                     expr: Expr::Op {
                         left,
                         op: convert_op(op),
@@ -222,7 +226,7 @@ impl<'c> Parser<'c> {
             ExprKind::Yield { value: _ } => Err(ParseError::Todo("Yield")),
             ExprKind::YieldFrom { value: _ } => Err(ParseError::Todo("YieldFrom")),
             ExprKind::Compare { left, ops, comparators } => Ok(ExprLoc::new(
-                self.convert_range(&range),
+                self.convert_range(range),
                 Expr::CmpOp {
                     left: Box::new(self.parse_expression(*left)?),
                     op: convert_compare_op(first(ops)?),
@@ -238,10 +242,10 @@ impl<'c> Parser<'c> {
                     .into_iter()
                     .map(|f| self.parse_kwargs(f))
                     .collect::<ParseResult<_>>()?;
-                let position = self.convert_range(&range);
+                let position = self.convert_range(range);
                 match func.node {
                     ExprKind::Name { id, .. } => {
-                        let func = Identifier::from_name(id, self.convert_range(&func.range));
+                        let func = Identifier::from_name(id, self.convert_range(func.range));
                         let func = Function::Ident(func);
                         Ok(ExprLoc::new(position, Expr::Call { func, args, kwargs }))
                     }
@@ -270,7 +274,7 @@ impl<'c> Parser<'c> {
             } => Err(ParseError::Todo("FormattedValue")),
             ExprKind::JoinedStr { values: _ } => Err(ParseError::Todo("JoinedStr")),
             ExprKind::Constant { value, .. } => Ok(ExprLoc::new(
-                self.convert_range(&range),
+                self.convert_range(range),
                 Expr::Constant(convert_const(value)?),
             )),
             ExprKind::Attribute {
@@ -285,8 +289,8 @@ impl<'c> Parser<'c> {
             } => Err(ParseError::Todo("Subscript")),
             ExprKind::Starred { value: _, ctx: _ } => Err(ParseError::Todo("Starred")),
             ExprKind::Name { id, .. } => Ok(ExprLoc::new(
-                self.convert_range(&range),
-                Expr::Name(Identifier::from_name(id, self.convert_range(&expression.range))),
+                self.convert_range(range),
+                Expr::Name(Identifier::from_name(id, self.convert_range(expression.range))),
             )),
             // TODO what is ctx here?
             ExprKind::List { elts, ctx: _ } => {
@@ -295,7 +299,7 @@ impl<'c> Parser<'c> {
                     .map(|f| self.parse_expression(f))
                     .collect::<ParseResult<_>>()?;
 
-                Ok(ExprLoc::new(self.convert_range(&range), Expr::List(items)))
+                Ok(ExprLoc::new(self.convert_range(range), Expr::List(items)))
             }
             ExprKind::Tuple { elts: _, ctx: _ } => Err(ParseError::Todo("Tuple")),
             ExprKind::Slice {
@@ -308,7 +312,7 @@ impl<'c> Parser<'c> {
 
     fn parse_kwargs(&self, kwarg: Keyword) -> ParseResult<'c, Kwarg<'c>> {
         let key = match kwarg.node.arg {
-            Some(key) => Identifier::from_name(key, self.convert_range(&kwarg.range)),
+            Some(key) => Identifier::from_name(key, self.convert_range(kwarg.range)),
             None => return Err(ParseError::Todo("kwargs with no key")),
         };
         let value = self.parse_expression(kwarg.node.value)?;
@@ -317,14 +321,14 @@ impl<'c> Parser<'c> {
 
     fn parse_identifier(&self, ast: AstExpr) -> ParseResult<'c, Identifier<'c>> {
         match ast.node {
-            ExprKind::Name { id, .. } => Ok(Identifier::from_name(id, self.convert_range(&ast.range))),
+            ExprKind::Name { id, .. } => Ok(Identifier::from_name(id, self.convert_range(ast.range))),
             _ => Err(ParseError::Internal(
                 format!("Expected name, got {:?}", ast.node).into(),
             )),
         }
     }
 
-    fn convert_range(&self, range: &TextRange) -> CodeRange<'c> {
+    fn convert_range(&self, range: TextRange) -> CodeRange<'c> {
         let start = range.start().into();
         let (start_line_no, start_line_start, start_line_end) = self.index_to_position(start);
         let start = CodeLoc::new(start_line_no, start - start_line_start + 1);
@@ -359,14 +363,14 @@ impl<'c> Parser<'c> {
 }
 
 fn first<T: fmt::Debug>(v: Vec<T>) -> ParseResult<'static, T> {
-    if v.len() != 1 {
-        Err(ParseError::Internal(
-            format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into(),
-        ))
-    } else {
+    if v.len() == 1 {
         v.into_iter()
             .next()
             .ok_or_else(|| ParseError::Internal("Expected 1 element, got 0".into()))
+    } else {
+        Err(ParseError::Internal(
+            format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into(),
+        ))
     }
 }
 
@@ -413,10 +417,13 @@ fn convert_compare_op(op: Cmpop) -> CmpOperator {
 fn convert_const(c: Constant) -> ParseResult<'static, Object> {
     let v = match c {
         Constant::None => Object::None,
-        Constant::Bool(b) => match b {
-            true => Object::True,
-            false => Object::False,
-        },
+        Constant::Bool(b) => {
+            if b {
+                Object::True
+            } else {
+                Object::False
+            }
+        }
         Constant::Str(s) => Object::Str(s),
         Constant::Bytes(b) => Object::Bytes(b),
         Constant::Int(big_int) => match big_int.to_i64() {
@@ -442,7 +449,7 @@ pub(crate) struct CodeRange<'c> {
     end: CodeLoc,
 }
 
-impl<'c> fmt::Display for CodeRange<'c> {
+impl fmt::Display for CodeRange<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} to {}", self.start, self.end)
     }
@@ -486,7 +493,7 @@ impl<'c> CodeRange<'c> {
             )?;
         }
 
-        if let Some(ref line) = self.preview_line {
+        if let Some(line) = &self.preview_line {
             writeln!(f, "    {line}")?;
             write!(f, "{}", " ".repeat(4 - 1 + self.start.column as usize))?;
             writeln!(f, "{}", "~".repeat((self.end.column - self.start.column) as usize))

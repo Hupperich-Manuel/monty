@@ -39,7 +39,7 @@ pub(crate) fn evaluate<'c, 'd>(
         Expr::List(elements) => {
             let objects = elements
                 .iter()
-                .map(|e| evaluate(namespace, e).map(|ob| ob.into_owned()))
+                .map(|e| evaluate(namespace, e).map(std::borrow::Cow::into_owned))
                 .collect::<RunResult<_>>()?;
             Ok(Cow::Owned(Object::List(objects)))
         }

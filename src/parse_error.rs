@@ -12,7 +12,7 @@ pub enum ParseError<'c> {
     PreEvalInternal(InternalRunError),
 }
 
-impl<'c> fmt::Display for ParseError<'c> {
+impl fmt::Display for ParseError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Todo(s) => write!(f, "TODO: {s}"),
@@ -39,13 +39,14 @@ impl<'c> From<ExceptionRaise<'c>> for ParseError<'c> {
     }
 }
 
-impl<'c> From<InternalRunError> for ParseError<'c> {
+impl From<InternalRunError> for ParseError<'_> {
     fn from(internal_run_error: InternalRunError) -> Self {
         Self::PreEvalInternal(internal_run_error)
     }
 }
 
-impl<'c> ParseError<'c> {
+impl ParseError<'_> {
+    #[must_use]
     pub fn summary(&self) -> String {
         match self {
             Self::Todo(s) => format!("TODO: {s}"),
