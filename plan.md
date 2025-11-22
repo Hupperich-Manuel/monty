@@ -514,54 +514,24 @@ namespace[const_id] = Object::Ref(id);
 
 ### Phase 3: Assignment & Cloning Semantics
 
-**Goal**: Implement reference semantics for assignments
+**Goal**: Transition heap-managed types (lists first, then str/bytes/dict/set/frozenset/tuples/exceptions) into the arena, introduce helper APIs for safe cloning/dropping, and update the runtime to inc/dec refs on assignment.
 
-**Changes Required**:
-- `src/run.rs` - Update assignment handling to inc_ref
-- Add Drop implementation for proper cleanup
+**Key Milestones**:
 
-**Implementation Steps**:
+1. **Helper APIs**:
+   - Add `Object::clone_with_heap`, `Object::drop_with_heap`, and a `CowObjectExt` trait so evaluation/frames can acquire owned values without leaking references.
+   - Teach `Object::bool`, `Object::len`, `Object::py_eq`, etc., to accept a `Heap` parameter since their semantics will depend on the arena contents.
 
-1. **Update assignment**:
-```rust
-// In handle_assign()
-fn handle_assign(frame: &mut RunFrame, target_id: usize, value: Object) {
-    // Dec ref on old value (if any)
-    if let Object::Ref(old_id) = frame.namespace[target_id] {
-        frame.heap.dec_ref(old_id);
-    }
+2. **Move Types Incrementally**:
+   - Start with `list`: store list storage in `HeapData::List(Rc<RefCell<Vec<Object>>>`), make `Object::Ref(ObjectId)` the only heap-backed variant, and update list literals/attributes to allocate into the heap.
+   - Follow up with `tuple`, `str`, `bytes`, `dict`, `set`, `frozenset`, and exception objects in later iterations, keeping each conversion small and testable.
 
-    // Inc ref on new value
-    if let Object::Ref(new_id) = value {
-        frame.heap.inc_ref(new_id);
-    }
+3. **Assignment & Drop Semantics**:
+   - Update `RunFrame` to call `clone_with_heap`/`drop_with_heap` when storing or discarding values (including temporaries from expression statements).
+   - Add explicit cleanup (before returning from `Executor::run`) to release any remaining references in namespaces.
 
-    // Store new value
-    frame.namespace[target_id] = value;
-}
-```
-
-2. **Implement proper cleanup**:
-```rust
-impl Drop for RunFrame<'_> {
-    fn drop(&mut self) {
-        // Dec ref all objects in namespace
-        for obj in &self.namespace {
-            if let Object::Ref(id) = obj {
-                self.heap.dec_ref(*id);
-            }
-        }
-    }
-}
-```
-
-**Testing**: Test that reference semantics work correctly:
-```python
-a = [1, 2, 3]
-b = a
-b.append(4)
-assert a == [1, 2, 3, 4]  # Must pass!
-```
+4. **Testing**:
+   - Add regression tests for shared list mutation (`b = a; b.append(2)`), default mutable arguments, and any other aliasing scenarios as each type migrates.
 
 ### Phase 4: Object Identity & `is` Operator
 
