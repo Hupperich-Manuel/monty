@@ -26,6 +26,13 @@ impl<'c, 'h> Exit<'c, 'h> {
             FrameExit::Raise(exc) => Self::Raise(exc),
         }
     }
+
+    pub fn value(self) -> Result<Value<'h>, ConversionError> {
+        match self {
+            Self::Return(value) => Ok(value),
+            Self::Raise(_) => Err(ConversionError::new("value", "raise")),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -79,6 +86,12 @@ pub struct ConversionError {
     pub actual: &'static str,
 }
 
+impl ConversionError {
+    pub fn new(expected: &'static str, actual: &'static str) -> Self {
+        Self { expected, actual }
+    }
+}
+
 impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "expected {}, got {}", self.expected, self.actual)
@@ -95,10 +108,7 @@ impl TryFrom<&Value<'_>> for i64 {
     fn try_from(value: &Value<'_>) -> Result<Self, Self::Error> {
         match value.object {
             Object::Int(i) => Ok(i),
-            _ => Err(ConversionError {
-                expected: "int",
-                actual: value.type_str(),
-            }),
+            _ => Err(ConversionError::new("int", value.type_str())),
         }
     }
 }
@@ -113,10 +123,7 @@ impl TryFrom<&Value<'_>> for f64 {
         match value.object {
             Object::Float(f) => Ok(f),
             Object::Int(i) => Ok(i as f64),
-            _ => Err(ConversionError {
-                expected: "float",
-                actual: value.type_str(),
-            }),
+            _ => Err(ConversionError::new("float", value.type_str())),
         }
     }
 }
@@ -132,10 +139,7 @@ impl TryFrom<&Value<'_>> for String {
                 return Ok(s.clone());
             }
         }
-        Err(ConversionError {
-            expected: "str",
-            actual: value.type_str(),
-        })
+        Err(ConversionError::new("str", value.type_str()))
     }
 }
 
@@ -149,10 +153,7 @@ impl TryFrom<&Value<'_>> for bool {
         match value.object {
             Object::True => Ok(true),
             Object::False => Ok(false),
-            _ => Err(ConversionError {
-                expected: "bool",
-                actual: value.type_str(),
-            }),
+            _ => Err(ConversionError::new("bool", value.type_str())),
         }
     }
 }
