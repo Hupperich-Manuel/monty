@@ -46,7 +46,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - run: cargo bench
+      - run: cargo bench -- --test
 
   # https://github.com/marketplace/actions/alls-green#why used for branch protection checks
   check:
