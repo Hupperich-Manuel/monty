@@ -291,13 +291,15 @@ struct HeapObject<'c, 'e> {
 
 /// Reference-counted arena that backs all heap-only runtime objects.
 ///
-/// The heap never reuses IDs during a single execution; instead it appends new
-/// entries and relies on `clear()` between runs.  This keeps identity checks
-/// simple and avoids the need for generation counters while we're still
-/// building out semantics.
+/// Uses a free list to reuse slots from freed objects, keeping memory usage
+/// constant for long-running loops that repeatedly allocate and free objects.
+/// When an object is freed via `dec_ref`, its slot ID is added to the free list.
+/// New allocations pop from the free list when available, otherwise append.
 #[derive(Debug, Default)]
 pub struct Heap<'c, 'e> {
     objects: Vec<Option<HeapObject<'c, 'e>>>,
+    /// IDs of freed slots available for reuse. Populated by `dec_ref`, consumed by `allocate`.
+    free_list: Vec<ObjectId>,
 }
 
 macro_rules! take_data {
@@ -327,20 +329,32 @@ macro_rules! restore_data {
 }
 
 impl<'c, 'e> Heap<'c, 'e> {
-    /// Allocates a new heap object, returning the fresh identifier.
+    /// Allocates a new heap object, returning the identifier.
+    ///
+    /// Reuses freed slots from the free list when available, otherwise appends
+    /// a new slot. This keeps memory usage constant for long-running loops.
     ///
     /// Hash computation is deferred until the object is used as a dict key
     /// (via `get_or_compute_hash`). This avoids computing hashes for objects
     /// that are never used as dict keys, improving allocation performance.
     pub fn allocate(&mut self, data: HeapData<'c, 'e>) -> ObjectId {
-        let id = self.objects.len();
         let hash_state = HashState::for_data(&data);
-        self.objects.push(Some(HeapObject {
+        let new_object = HeapObject {
             refcount: 1,
             data: Some(data),
             hash_state,
-        }));
-        id
+        };
+
+        if let Some(id) = self.free_list.pop() {
+            // Reuse a freed slot
+            self.objects[id] = Some(new_object);
+            id
+        } else {
+            // No free slots, append new entry
+            let id = self.objects.len();
+            self.objects.push(Some(new_object));
+            id
+        }
     }
 
     /// Increments the reference count for an existing heap object.
@@ -359,8 +373,9 @@ impl<'c, 'e> Heap<'c, 'e> {
 
     /// Decrements the reference count and frees the object (plus children) once it hits zero.
     ///
-    /// Uses recursion rather than an explicit stack for better performance - avoiding
-    /// repeated Vec allocations and benefiting from call stack locality.
+    /// When an object is freed, its slot ID is added to the free list for reuse by
+    /// future allocations. Uses recursion for child cleanup - avoiding repeated Vec
+    /// allocations and benefiting from call stack locality.
     ///
     /// # Panics
     /// Panics if the object ID is invalid or the object has already been freed.
@@ -370,7 +385,9 @@ impl<'c, 'e> Heap<'c, 'e> {
         if entry.refcount > 1 {
             entry.refcount -= 1;
         } else if let Some(object) = slot.take() {
-            // refcount == 1, free the object and recursively decrement children
+            // refcount == 1, free the object and add slot to free list for reuse
+            self.free_list.push(id);
+            // then recursively decrement children
             if let Some(data) = object.data {
                 let mut child_ids = Vec::new();
                 data.py_dec_ref_ids(&mut child_ids);
@@ -529,6 +546,7 @@ impl<'c, 'e> Heap<'c, 'e> {
     /// Removes all objects and resets the ID counter, used between executor runs.
     pub fn clear(&mut self) {
         self.objects.clear();
+        self.free_list.clear();
     }
 
     /// Returns the reference count for the heap object at the given ID.
