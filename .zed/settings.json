@@ -1,11 +1,11 @@
 {
-	"lsp": {
-		"rust-analyzer": {
-			"initialization_options": {
-				"cargo": {
-					"features": ["dec-ref-check"]
-				}
-			}
-		}
-	}
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "features": ["dec-ref-check"]
+        }
+      }
+    }
+  }
 }

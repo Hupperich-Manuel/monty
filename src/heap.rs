@@ -21,8 +21,6 @@ pub type ObjectId = usize;
 /// that need heap identity (e.g., when `id()` is called on an int).
 #[derive(Debug)]
 pub enum HeapData<'c, 'e> {
-    /// Object in the heap is used when calculating the id of an object to provide it with a unique identity.
-    Object(Object<'c, 'e>),
     Str(Str),
     Bytes(Bytes),
     List(List<'c, 'e>),
@@ -63,7 +61,7 @@ impl<'c, 'e> HeapData<'c, 'e> {
                 Some(hasher.finish())
             }
             // Mutable types cannot be hashed
-            Self::List(_) | Self::Dict(_) | Self::Object(_) => None,
+            Self::List(_) | Self::Dict(_) => None,
         }
     }
 }
@@ -75,7 +73,6 @@ impl<'c, 'e> HeapData<'c, 'e> {
 impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
     fn py_type(&self, heap: &Heap<'c, 'e>) -> &'static str {
         match self {
-            Self::Object(obj) => obj.py_type(heap),
             Self::Str(s) => s.py_type(heap),
             Self::Bytes(b) => b.py_type(heap),
             Self::List(l) => l.py_type(heap),
@@ -86,7 +83,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_len(&self, heap: &Heap<'c, 'e>) -> Option<usize> {
         match self {
-            Self::Object(obj) => PyValue::py_len(obj, heap),
             Self::Str(s) => PyValue::py_len(s, heap),
             Self::Bytes(b) => PyValue::py_len(b, heap),
             Self::List(l) => PyValue::py_len(l, heap),
@@ -97,7 +93,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_eq(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> bool {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => a.py_eq(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_eq(b, heap),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_eq(b, heap),
             (Self::List(a), Self::List(b)) => a.py_eq(b, heap),
@@ -109,7 +104,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<ObjectId>) {
         match self {
-            Self::Object(obj) => obj.py_dec_ref_ids(stack),
             Self::Str(s) => s.py_dec_ref_ids(stack),
             Self::Bytes(b) => b.py_dec_ref_ids(stack),
             Self::List(l) => l.py_dec_ref_ids(stack),
@@ -120,7 +114,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_bool(&self, heap: &Heap<'c, 'e>) -> bool {
         match self {
-            Self::Object(obj) => obj.py_bool(heap),
             Self::Str(s) => s.py_bool(heap),
             Self::Bytes(b) => b.py_bool(heap),
             Self::List(l) => l.py_bool(heap),
@@ -131,7 +124,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_repr<'a>(&'a self, heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
         match self {
-            Self::Object(obj) => obj.py_repr(heap),
             Self::Str(s) => s.py_repr(heap),
             Self::Bytes(b) => b.py_repr(heap),
             Self::List(l) => l.py_repr(heap),
@@ -142,7 +134,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_str<'a>(&'a self, heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
         match self {
-            Self::Object(obj) => obj.py_str(heap),
             Self::Str(s) => s.py_str(heap),
             Self::Bytes(b) => b.py_str(heap),
             Self::List(l) => l.py_str(heap),
@@ -153,7 +144,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_add(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => a.py_add(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_add(b, heap),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_add(b, heap),
             (Self::List(a), Self::List(b)) => a.py_add(b, heap),
@@ -165,7 +155,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_sub(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => a.py_sub(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_sub(b, heap),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_sub(b, heap),
             (Self::List(a), Self::List(b)) => a.py_sub(b, heap),
@@ -177,7 +166,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_mod(&self, other: &Self) -> Option<Object<'c, 'e>> {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => a.py_mod(b),
             (Self::Str(a), Self::Str(b)) => a.py_mod(b),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_mod(b),
             (Self::List(a), Self::List(b)) => a.py_mod(b),
@@ -189,7 +177,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => a.py_mod_eq(b, right_value),
             (Self::Str(a), Self::Str(b)) => a.py_mod_eq(b, right_value),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_mod_eq(b, right_value),
             (Self::List(a), Self::List(b)) => a.py_mod_eq(b, right_value),
@@ -201,7 +188,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_iadd(&mut self, other: Object<'c, 'e>, heap: &mut Heap<'c, 'e>, self_id: Option<ObjectId>) -> bool {
         match self {
-            Self::Object(obj) => obj.py_iadd(other, heap, self_id),
             Self::Str(s) => s.py_iadd(other, heap, self_id),
             Self::Bytes(b) => b.py_iadd(other, heap, self_id),
             Self::List(l) => l.py_iadd(other, heap, self_id),
@@ -217,7 +203,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
         args: ArgObjects<'c, 'e>,
     ) -> RunResult<'c, Object<'c, 'e>> {
         match self {
-            Self::Object(obj) => obj.py_call_attr(heap, attr, args),
             Self::Str(s) => s.py_call_attr(heap, attr, args),
             Self::Bytes(b) => b.py_call_attr(heap, attr, args),
             Self::List(l) => l.py_call_attr(heap, attr, args),
@@ -228,7 +213,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_getitem(&self, key: &Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Object<'c, 'e>> {
         match self {
-            Self::Object(obj) => obj.py_getitem(key, heap),
             Self::Str(s) => s.py_getitem(key, heap),
             Self::Bytes(b) => b.py_getitem(key, heap),
             Self::List(l) => l.py_getitem(key, heap),
@@ -239,7 +223,6 @@ impl<'c, 'e> PyValue<'c, 'e> for HeapData<'c, 'e> {
 
     fn py_setitem(&mut self, key: Object<'c, 'e>, value: Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, ()> {
         match self {
-            Self::Object(obj) => obj.py_setitem(key, value, heap),
             Self::Str(s) => s.py_setitem(key, value, heap),
             Self::Bytes(b) => b.py_setitem(key, value, heap),
             Self::List(l) => l.py_setitem(key, value, heap),
