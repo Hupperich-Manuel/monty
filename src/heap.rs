@@ -26,6 +26,13 @@ pub enum HeapData<'c, 'e> {
     List(List<'c, 'e>),
     Tuple(Tuple<'c, 'e>),
     Dict(Dict<'c, 'e>),
+    /// A cell wrapping a single mutable value for closure support.
+    ///
+    /// Cells enable nonlocal variable access by providing a heap-allocated
+    /// container that can be shared between a function and its nested functions.
+    /// Both the outer function and inner function hold references to the same
+    /// cell, allowing modifications to propagate across scope boundaries.
+    Cell(Value<'c, 'e>),
     // TODO: support arbitrary classes
 }
 
@@ -60,8 +67,8 @@ impl<'c, 'e> HeapData<'c, 'e> {
                 }
                 Some(hasher.finish())
             }
-            // Mutable types cannot be hashed
-            Self::List(_) | Self::Dict(_) => None,
+            // Mutable types cannot be hashed (Cell is handled specially in get_or_compute_hash)
+            Self::List(_) | Self::Dict(_) | Self::Cell(_) => None,
         }
     }
 }
@@ -78,6 +85,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_type(heap),
             Self::Tuple(t) => t.py_type(heap),
             Self::Dict(d) => d.py_type(heap),
+            Self::Cell(_) => "cell",
         }
     }
 
@@ -88,6 +96,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => PyTrait::py_len(l, heap),
             Self::Tuple(t) => PyTrait::py_len(t, heap),
             Self::Dict(d) => PyTrait::py_len(d, heap),
+            Self::Cell(_) => None, // Cells don't have length
         }
     }
 
@@ -98,6 +107,8 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             (Self::List(a), Self::List(b)) => a.py_eq(b, heap),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_eq(b, heap),
             (Self::Dict(a), Self::Dict(b)) => a.py_eq(b, heap),
+            // Cells compare by identity only (handled at Value level via HeapId comparison)
+            (Self::Cell(_), Self::Cell(_)) => false,
             _ => false, // Different types are never equal
         }
     }
@@ -109,6 +120,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_dec_ref_ids(stack),
             Self::Tuple(t) => t.py_dec_ref_ids(stack),
             Self::Dict(d) => d.py_dec_ref_ids(stack),
+            Self::Cell(v) => v.py_dec_ref_ids(stack),
         }
     }
 
@@ -119,6 +131,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_bool(heap),
             Self::Tuple(t) => t.py_bool(heap),
             Self::Dict(d) => d.py_bool(heap),
+            Self::Cell(_) => true, // Cells are always truthy
         }
     }
 
@@ -129,6 +142,8 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_repr(heap),
             Self::Tuple(t) => t.py_repr(heap),
             Self::Dict(d) => d.py_repr(heap),
+            // Cell repr shows the contained value's type
+            Self::Cell(v) => format!("<cell: {} object>", v.py_type(heap)).into(),
         }
     }
 
@@ -139,6 +154,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_str(heap),
             Self::Tuple(t) => t.py_str(heap),
             Self::Dict(d) => d.py_str(heap),
+            Self::Cell(v) => format!("<cell: {} object>", v.py_type(heap)).into(),
         }
     }
 
@@ -149,6 +165,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             (Self::List(a), Self::List(b)) => a.py_add(b, heap),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_add(b, heap),
             (Self::Dict(a), Self::Dict(b)) => a.py_add(b, heap),
+            // Cells don't support arithmetic operations
             _ => None,
         }
     }
@@ -160,6 +177,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             (Self::List(a), Self::List(b)) => a.py_sub(b, heap),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_sub(b, heap),
             (Self::Dict(a), Self::Dict(b)) => a.py_sub(b, heap),
+            // Cells don't support arithmetic operations
             _ => None,
         }
     }
@@ -171,6 +189,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             (Self::List(a), Self::List(b)) => a.py_mod(b),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_mod(b),
             (Self::Dict(a), Self::Dict(b)) => a.py_mod(b),
+            // Cells don't support arithmetic operations
             _ => None,
         }
     }
@@ -182,6 +201,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             (Self::List(a), Self::List(b)) => a.py_mod_eq(b, right_value),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_mod_eq(b, right_value),
             (Self::Dict(a), Self::Dict(b)) => a.py_mod_eq(b, right_value),
+            // Cells don't support arithmetic operations
             _ => None,
         }
     }
@@ -193,6 +213,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_iadd(other, heap, self_id),
             Self::Tuple(t) => t.py_iadd(other, heap, self_id),
             Self::Dict(d) => d.py_iadd(other, heap, self_id),
+            Self::Cell(_) => false, // Cells don't support in-place add
         }
     }
 
@@ -208,6 +229,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_call_attr(heap, attr, args),
             Self::Tuple(t) => t.py_call_attr(heap, attr, args),
             Self::Dict(d) => d.py_call_attr(heap, attr, args),
+            Self::Cell(_) => Err(crate::exceptions::ExcType::attribute_error("cell", attr)),
         }
     }
 
@@ -218,6 +240,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_getitem(key, heap),
             Self::Tuple(t) => t.py_getitem(key, heap),
             Self::Dict(d) => d.py_getitem(key, heap),
+            Self::Cell(_) => Err(crate::exceptions::ExcType::type_error_not_sub("cell")),
         }
     }
 
@@ -228,6 +251,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
             Self::List(l) => l.py_setitem(key, value, heap),
             Self::Tuple(t) => t.py_setitem(key, value, heap),
             Self::Dict(d) => d.py_setitem(key, value, heap),
+            Self::Cell(_) => Err(crate::exceptions::ExcType::type_error_not_sub_assignment("cell")),
         }
     }
 }
@@ -246,8 +270,9 @@ enum HashState {
 impl HashState {
     fn for_data(data: &HeapData<'_, '_>) -> Self {
         match data {
-            HeapData::Str(_) | HeapData::Bytes(_) | HeapData::Tuple(_) => Self::Unknown,
-            _ => Self::Unhashable,
+            // Cells are hashable by identity (like all Python objects without __hash__ override)
+            HeapData::Str(_) | HeapData::Bytes(_) | HeapData::Tuple(_) | HeapData::Cell(_) => Self::Unknown,
+            HeapData::List(_) | HeapData::Dict(_) => Self::Unhashable,
         }
     }
 }
@@ -348,6 +373,18 @@ impl<'c, 'e> Heap<'c, 'e> {
         }
     }
 
+    /// Allocates a new cell containing the given value.
+    ///
+    /// Cells are used for closure support, allowing values to be shared between
+    /// a function and its nested closures. The cell is created with refcount 1.
+    ///
+    /// Note: The contained value's refcount is NOT incremented. The caller is
+    /// responsible for ensuring proper reference counting of the value before
+    /// putting it in a cell (typically by cloning with `clone_with_heap`).
+    pub fn alloc_cell(&mut self, value: Value<'c, 'e>) -> HeapId {
+        self.allocate(HeapData::Cell(value))
+    }
+
     /// Increments the reference count for an existing heap entry.
     ///
     /// # Panics
@@ -444,6 +481,15 @@ impl<'c, 'e> Heap<'c, 'e> {
             HashState::Unhashable => return None,
             HashState::Cached(hash) => return Some(hash),
             HashState::Unknown => {}
+        }
+
+        // Handle Cell specially - uses identity-based hashing (like Python cell objects)
+        if let Some(HeapData::Cell(_)) = &entry.data {
+            let mut hasher = DefaultHasher::new();
+            id.hash(&mut hasher);
+            let hash = hasher.finish();
+            entry.hash_state = HashState::Cached(hash);
+            return Some(hash);
         }
 
         // Compute hash lazily - need to temporarily take data to avoid borrow conflict
@@ -578,6 +624,62 @@ impl<'c, 'e> Heap<'c, 'e> {
     #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.iter().filter(|o| o.is_some()).count()
+    }
+
+    /// Gets the value inside a cell, cloning it with proper refcount handling.
+    ///
+    /// Uses `clone_with_heap` to properly handle all value types including closures,
+    /// which need their captured cell refcounts incremented.
+    ///
+    /// # Panics
+    /// Panics if the ID is invalid, the value has been freed, or the entry is not a Cell.
+    pub fn get_cell_value(&mut self, id: HeapId) -> Value<'c, 'e> {
+        // Take the data out to avoid borrow conflicts when cloning
+        let data = take_data!(self, id, "get_cell_value");
+
+        let result = match &data {
+            HeapData::Cell(v) => v.clone_with_heap(self),
+            _ => panic!("Heap::get_cell_value: entry is not a Cell"),
+        };
+
+        // Restore data before returning
+        restore_data!(self, id, data, "get_cell_value");
+
+        result
+    }
+
+    /// Sets the value inside a cell, properly dropping the old value.
+    ///
+    /// # Panics
+    /// Panics if the ID is invalid, the value has been freed, or the entry is not a Cell.
+    pub fn set_cell_value(&mut self, id: HeapId, value: Value<'c, 'e>) {
+        // Take the data out to avoid borrow conflicts
+        let mut data = take_data!(self, id, "set_cell_value");
+
+        match &mut data {
+            HeapData::Cell(old_value) => {
+                // Swap in the new value
+                let old = std::mem::replace(old_value, value);
+                // Restore data first, then drop old value
+                restore_data!(self, id, data, "set_cell_value");
+                old.drop_with_heap(self);
+            }
+            _ => panic!("Heap::set_cell_value: entry is not a Cell"),
+        }
+    }
+
+    /// Returns a reference to the value inside a cell without cloning.
+    ///
+    /// Useful when you only need to read the cell's value temporarily.
+    ///
+    /// # Panics
+    /// Panics if the ID is invalid, the value has been freed, or the entry is not a Cell.
+    pub fn get_cell_value_ref(&self, id: HeapId) -> &Value<'c, 'e> {
+        let data = self.get(id);
+        match data {
+            HeapData::Cell(v) => v,
+            _ => panic!("Heap::get_cell_value_ref: entry is not a Cell"),
+        }
     }
 
     /// Helper for List in-place add: extends the destination vec with items from a heap list.

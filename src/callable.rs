@@ -72,6 +72,12 @@ impl<'c> Callable<'c> {
                         callable.call(namespaces, local_idx, heap, args)
                     }
                     Value::Function(f) => f.call(namespaces, heap, args),
+                    Value::Closure(f, cells) => {
+                        // Clone the cells to release the borrow on callable_obj before calling
+                        // call_with_cells will inc_ref when injecting into the new namespace
+                        let cells = cells.clone();
+                        f.call_with_cells(namespaces, heap, args, &cells)
+                    }
                     _ => {
                         let type_name = callable_obj.py_type(heap);
                         let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");

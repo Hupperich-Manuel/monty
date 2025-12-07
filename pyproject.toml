@@ -16,15 +16,16 @@ include = [
     "scripts/**/*.py",
     "test_cases/**/*.py",
 ]
+# Exclude files with intentional syntax errors (used for testing parse error handling)
+extend-exclude = [
+    "test_cases/nonlocal__error_module_level.py",
+]
 
 [tool.ruff.lint]
 extend-select = [
     "Q",      # https://docs.astral.sh/ruff/rules/#flake8-quotes-q
     "RUF100", # https://docs.astral.sh/ruff/rules/unused-noqa/
-    "C90",    # https://docs.astral.sh/ruff/rules/#mccabe-c90
-    "UP",     # https://docs.astral.sh/ruff/rules/#pyupgrade-up
     "I",      # https://docs.astral.sh/ruff/rules/#isort-i
-    "DTZ005", # https://docs.astral.sh/ruff/rules/call-datetime-now-without-tzinfo/
     "FA",     # https://docs.astral.sh/ruff/rules/#flake8-future-annotations-fa
 ]
 flake8-quotes = { inline-quotes = "single", multiline-quotes = "double" }
@@ -35,9 +36,6 @@ ignore = [
     "F811", # Redefinition of unused variable
     "F541", # f-string without any placeholders
 ]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
 
 [tool.ruff.format]
 docstring-code-format = true

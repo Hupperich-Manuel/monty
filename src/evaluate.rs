@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::args::{ArgExprs, ArgValues};
 use crate::exceptions::{internal_err, InternalRunError, SimpleException};
-use crate::expressions::{Expr, ExprLoc, Identifier};
+use crate::expressions::{Expr, ExprLoc, Identifier, NameScope};
 use crate::fstring::evaluate_fstring;
 use crate::heap::{Heap, HeapData};
 use crate::namespace::Namespaces;
@@ -27,9 +27,7 @@ pub(crate) fn evaluate_use<'c, 'e>(
     match &expr_loc.expr {
         Expr::Literal(literal) => Ok(literal.to_value()),
         Expr::Callable(callable) => Ok(callable.to_value()),
-        Expr::Name(ident) => namespaces
-            .get_var_mut(local_idx, ident)
-            .map(|object| object.clone_with_heap(heap)),
+        Expr::Name(ident) => namespaces.get_var_value(local_idx, heap, ident),
         Expr::Call { callable, args } => {
             let args = evaluate_args(namespaces, local_idx, heap, args)?;
             callable.call(namespaces, local_idx, heap, args)
@@ -123,7 +121,23 @@ pub(crate) fn evaluate_discard<'c, 'e>(
     match &expr_loc.expr {
         // TODO, is this right for callable?
         Expr::Literal(_) | Expr::Callable(_) => Ok(()),
-        Expr::Name(ident) => namespaces.get_var_mut(local_idx, ident).map(|_| ()),
+        Expr::Name(ident) => {
+            // For discard, we just need to verify the variable exists
+            match ident.scope {
+                NameScope::Cell => {
+                    // Cell variable - look up from namespace and verify it's a cell
+                    let namespace = namespaces.get(local_idx);
+                    if let Value::Ref(cell_id) = namespace[ident.heap_id()] {
+                        // Just verify we can access it - don't need the value
+                        let _ = heap.get_cell_value_ref(cell_id);
+                        Ok(())
+                    } else {
+                        panic!("Cell variable slot doesn't contain a cell reference - prepare-time bug");
+                    }
+                }
+                _ => namespaces.get_var_mut(local_idx, ident).map(|_| ()),
+            }
+        }
         Expr::Call { callable, args } => {
             let args = evaluate_args(namespaces, local_idx, heap, args)?;
             let result = callable.call(namespaces, local_idx, heap, args)?;
@@ -184,6 +198,12 @@ pub(crate) fn evaluate_discard<'c, 'e>(
 }
 
 /// Specialized helper for truthiness checks; shares implementation with `evaluate`.
+///
+/// # Arguments
+/// * `namespaces` - The namespace namespaces containing all namespaces
+/// * `local_idx` - Index of the local namespace in namespaces
+/// * `heap` - The heap for allocating objects
+/// * `expr_loc` - The expression to evaluate
 pub(crate) fn evaluate_bool<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,
@@ -248,18 +268,18 @@ fn eval_op<'c, 'e>(
         rhs.drop_with_heap(heap);
         Ok(object)
     } else {
-        let left_type = lhs.py_type(heap);
-        let right_type = rhs.py_type(heap);
+        let lhs_type = lhs.py_type(heap);
+        let rhs_type = rhs.py_type(heap);
+        // Drop temporary references before returning error
         lhs.drop_with_heap(heap);
         rhs.drop_with_heap(heap);
-        SimpleException::operand_type_error(left, op, right, left_type, right_type)
+        SimpleException::operand_type_error(left, op, right, lhs_type, rhs_type)
     }
 }
 
-/// Evaluates the `and` operator with short-circuit evaluation.
+/// Helper to evaluate the `and` operator with short-circuit evaluation.
 ///
-/// Python's `and` operator returns the first falsy operand, or the last operand if all are truthy.
-/// For example: `5 and 3` returns `3`, while `0 and 3` returns `0`.
+/// Returns the first falsy value encountered, or the last value if all are truthy.
 fn eval_and<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,
@@ -267,21 +287,20 @@ fn eval_and<'c, 'e>(
     left: &'e ExprLoc<'c>,
     right: &'e ExprLoc<'c>,
 ) -> RunResult<'c, Value<'c, 'e>> {
-    let left_val = evaluate_use(namespaces, local_idx, heap, left)?;
-    if left_val.py_bool(heap) {
-        // Left is truthy, drop it and return right
-        left_val.drop_with_heap(heap);
+    let lhs = evaluate_use(namespaces, local_idx, heap, left)?;
+    if lhs.py_bool(heap) {
+        // Drop left operand since we're returning the right one
+        lhs.drop_with_heap(heap);
         evaluate_use(namespaces, local_idx, heap, right)
     } else {
-        // Short-circuit: return left if falsy
-        Ok(left_val)
+        // Short-circuit: return the falsy left operand
+        Ok(lhs)
     }
 }
 
-/// Evaluates the `or` operator with short-circuit evaluation.
+/// Helper to evaluate the `or` operator with short-circuit semantics.
 ///
-/// Python's `or` operator returns the first truthy operand, or the last operand if all are falsy.
-/// For example: `5 or 3` returns `5`, while `0 or 3` returns `3`.
+/// Returns the first truthy value encountered, or the last value if all are falsy.
 fn eval_or<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,
@@ -289,18 +308,22 @@ fn eval_or<'c, 'e>(
     left: &'e ExprLoc<'c>,
     right: &'e ExprLoc<'c>,
 ) -> RunResult<'c, Value<'c, 'e>> {
-    let left_val = evaluate_use(namespaces, local_idx, heap, left)?;
-    if left_val.py_bool(heap) {
-        // Short-circuit: return left if truthy
-        Ok(left_val)
+    let lhs = evaluate_use(namespaces, local_idx, heap, left)?;
+    if lhs.py_bool(heap) {
+        // Short-circuit: return the truthy left operand
+        Ok(lhs)
     } else {
-        // Left is falsy, drop it and return right
-        left_val.drop_with_heap(heap);
+        // Drop left operand since we're returning the right one
+        lhs.drop_with_heap(heap);
         evaluate_use(namespaces, local_idx, heap, right)
     }
 }
 
-/// Evaluates comparison operators, reusing `evaluate` so heap semantics remain consistent.
+/// Evaluates a comparison expression and returns the boolean result.
+///
+/// Comparisons always return bool because Python chained comparisons
+/// (e.g., `1 < x < 10`) would need the intermediate value, but we don't
+/// support chaining yet, so we can return bool directly.
 fn cmp_op<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,
@@ -322,6 +345,7 @@ fn cmp_op<'c, 'e>(
         CmpOperator::Is => Some(lhs.is(&rhs)),
         CmpOperator::IsNot => Some(!lhs.is(&rhs)),
         CmpOperator::ModEq(v) => lhs.py_mod_eq(&rhs, *v),
+        // In/NotIn are not yet supported
         _ => None,
     };
 
@@ -338,7 +362,10 @@ fn cmp_op<'c, 'e>(
     }
 }
 
-/// Handles attribute method calls like `list.append`, again threading the heap for safety.
+/// Calls a method on an object: `object.attr(args)`.
+///
+/// This evaluates `object`, looks up `attr`, calls the method with `args`,
+/// and handles proper cleanup of temporary values.
 fn attr_call<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,
@@ -350,11 +377,25 @@ fn attr_call<'c, 'e>(
     // Evaluate arguments first to avoid borrow conflicts
     let args = evaluate_args(namespaces, local_idx, heap, args)?;
 
-    let object = namespaces.get_var_mut(local_idx, object_ident)?;
-    object.call_attr(heap, attr, args)
+    // For Cell scope, look up the cell from the namespace and dereference
+    if let NameScope::Cell = object_ident.scope {
+        let namespace = namespaces.get(local_idx);
+        let Value::Ref(cell_id) = namespace[object_ident.heap_id()] else {
+            panic!("Cell variable slot doesn't contain a cell reference - prepare-time bug")
+        };
+        // get_cell_value already handles refcount increment
+        let mut cell_value = heap.get_cell_value(cell_id);
+        let result = cell_value.call_attr(heap, attr, args);
+        cell_value.drop_with_heap(heap);
+        result
+    } else {
+        // For normal scopes, use get_var_mut
+        let object = namespaces.get_var_mut(local_idx, object_ident)?;
+        object.call_attr(heap, attr, args)
+    }
 }
 
-/// Evaluates function arguments into an Args, optimized for common argument counts.
+/// Evaluates function call arguments from expressions to values.
 fn evaluate_args<'c, 'e>(
     namespaces: &mut Namespaces<'c, 'e>,
     local_idx: usize,

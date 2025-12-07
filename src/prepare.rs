@@ -57,8 +57,10 @@ pub(crate) fn prepare<'c>(
 ///
 /// For functions, this struct also tracks:
 /// - Which variables are declared `global` (should resolve to module namespace)
+/// - Which variables are declared `nonlocal` (should resolve to enclosing scope via cells)
 /// - Which variables are assigned locally (determines local vs global scope)
 /// - Reference to the global name map for resolving global variable references
+/// - Enclosing scope information for closure analysis
 struct Prepare {
     /// Maps variable names to their indices in this scope's namespace vector
     name_map: AHashMap<String, usize>,
@@ -83,6 +85,19 @@ struct Prepare {
     /// Used by functions to resolve global variable references.
     /// None at module level (not needed since all names are global there).
     global_name_map: Option<AHashMap<String, usize>>,
+    /// Names that exist as locals in the enclosing function scope.
+    /// Used to validate `nonlocal` declarations and resolve captured variables.
+    /// None at module level or when there's no enclosing function.
+    enclosing_locals: Option<AHashSet<String>>,
+    /// Maps free variable names (from nonlocal declarations and implicit captures) to their
+    /// index in the free_vars vector. Pre-populated with nonlocal names at initialization,
+    /// then extended with implicit captures discovered during preparation.
+    free_var_map: AHashMap<String, usize>,
+    /// Maps cell variable names to their index in the owned_cells vector.
+    /// Pre-populated with cell_var names at initialization (excluding pass-through variables
+    /// that are both nonlocal and captured by nested functions), then extended as new
+    /// captures are discovered during nested function preparation.
+    cell_var_map: AHashMap<String, usize>,
 }
 
 impl Prepare {
@@ -109,29 +124,72 @@ impl Prepare {
             assigned_names: AHashSet::new(),
             names_assigned_in_order: AHashSet::new(),
             global_name_map: None,
+            enclosing_locals: None,
+            free_var_map: AHashMap::new(),
+            cell_var_map: AHashMap::new(),
         }
     }
 
     /// Creates a new Prepare instance for function-level code.
+    ///
+    /// Pre-populates `free_var_map` with nonlocal declarations and `cell_var_map` with
+    /// cell variables (excluding pass-through variables that are both nonlocal and cell).
     ///
     /// # Arguments
     /// * `capacity` - Expected number of nodes
     /// * `params` - Function parameter names (pre-registered in namespace)
     /// * `assigned_names` - Names that are assigned in this function (from first-pass scan)
     /// * `global_names` - Names declared as `global` in this function
+    /// * `nonlocal_names` - Names declared as `nonlocal` in this function
     /// * `global_name_map` - Copy of the module-level name map for global resolution
+    /// * `enclosing_locals` - Names that exist as locals in the enclosing function (for nonlocal resolution)
+    /// * `cell_var_names` - Names that are captured by nested functions (must be stored in cells)
+    #[allow(clippy::too_many_arguments)]
     fn new_function(
         capacity: usize,
         params: &[&str],
         assigned_names: AHashSet<String>,
         global_names: AHashSet<String>,
+        nonlocal_names: AHashSet<String>,
         global_name_map: AHashMap<String, usize>,
+        enclosing_locals: Option<AHashSet<String>>,
+        cell_var_names: AHashSet<String>,
     ) -> Self {
         let mut name_map = AHashMap::with_capacity(capacity);
         for (index, name) in params.iter().enumerate() {
             name_map.insert((*name).to_string(), index);
         }
         let namespace_size = name_map.len();
+
+        // Namespace layout: [params][cell_vars][free_vars][locals]
+        // This predictable layout allows sequential namespace construction at runtime.
+
+        // Pre-populate cell_var_map with cell variables FIRST (right after params).
+        // Excludes pass-through variables (names that are both nonlocal and captured by
+        // nested functions - these stay in free_var_map since we receive the cell, not create it).
+        // NOTE: We intentionally do NOT add these to name_map here, because the scope
+        // validation checks name_map to detect "used before declaration" errors
+        let mut cell_var_map = AHashMap::with_capacity(cell_var_names.len());
+        let mut namespace_size = namespace_size;
+        for name in cell_var_names {
+            if !nonlocal_names.contains(&name) {
+                let slot = namespace_size;
+                namespace_size += 1;
+                cell_var_map.insert(name, slot);
+            }
+        }
+
+        // Pre-populate free_var_map with nonlocal declarations SECOND (after cell_vars).
+        // Each entry maps name -> namespace slot index where the cell reference will be stored.
+        // NOTE: We intentionally do NOT add these to name_map here, because the nonlocal
+        // validation in prepare_nodes checks name_map to detect "used before nonlocal declaration"
+        let mut free_var_map = AHashMap::with_capacity(nonlocal_names.len());
+        for name in nonlocal_names {
+            let slot = namespace_size;
+            namespace_size += 1;
+            free_var_map.insert(name, slot);
+        }
+
         Self {
             name_map,
             namespace_size,
@@ -141,6 +199,9 @@ impl Prepare {
             assigned_names,
             names_assigned_in_order: AHashSet::new(),
             global_name_map: Some(global_name_map),
+            enclosing_locals,
+            free_var_map,
+            cell_var_map,
         }
     }
 
@@ -294,6 +355,40 @@ impl Prepare {
                     }
                     // Global statements don't produce any runtime nodes
                 }
+                ParseNode::Nonlocal(names) => {
+                    // Nonlocal can only be used inside a function, not at module level
+                    if self.is_module_scope {
+                        let exc: ExceptionRaise = ExcType::syntax_error_nonlocal_at_module().into();
+                        return Err(exc.into());
+                    }
+                    // Validate that names weren't already used/assigned before `nonlocal` declaration
+                    // and that the binding exists in an enclosing scope
+                    for name in names {
+                        let name_str = name.to_string();
+                        if self.names_assigned_in_order.contains(&name_str) {
+                            // Name was assigned before the nonlocal declaration
+                            let exc: ExceptionRaise = ExcType::syntax_error_assigned_before_nonlocal(name).into();
+                            return Err(exc.into());
+                        } else if self.name_map.contains_key(&name_str) {
+                            // Name was used (but not assigned) before the nonlocal declaration
+                            let exc: ExceptionRaise = ExcType::syntax_error_used_before_nonlocal(name).into();
+                            return Err(exc.into());
+                        }
+                        // Validate that the binding exists in an enclosing scope
+                        if let Some(ref enclosing) = self.enclosing_locals {
+                            if !enclosing.contains(&name_str) {
+                                let exc: ExceptionRaise = ExcType::syntax_error_no_binding_nonlocal(name).into();
+                                return Err(exc.into());
+                            }
+                        } else {
+                            // No enclosing scope (function defined at module level)
+                            // The nonlocal must reference something in an enclosing function
+                            let exc: ExceptionRaise = ExcType::syntax_error_no_binding_nonlocal(name).into();
+                            return Err(exc.into());
+                        }
+                    }
+                    // Nonlocal statements don't produce any runtime nodes
+                }
             }
         }
         Ok(new_nodes)
@@ -435,9 +530,16 @@ impl Prepare {
     ///
     /// Pass 1: Scan the function body to collect:
     /// - Names declared as `global`
-    /// - Names that are assigned (these are local unless declared global)
+    /// - Names declared as `nonlocal`
+    /// - Names that are assigned (these are local unless declared global/nonlocal)
     ///
     /// Pass 2: Prepare the function body with the scope information from pass 1.
+    ///
+    /// # Closure Analysis
+    ///
+    /// When the nested function uses `nonlocal` declarations, those names must exist
+    /// in an enclosing scope. The enclosing scope's variable becomes a cell_var
+    /// (stored in a heap cell), and the nested function captures it as a free_var.
     fn prepare_function_def<'c>(
         &mut self,
         name: Identifier<'c>,
@@ -448,7 +550,7 @@ impl Prepare {
         let (name, _) = self.get_id(name);
 
         // Pass 1: Collect scope information from the function body
-        let (global_names, assigned_names) = collect_function_scope_info(&body);
+        let scope_info = collect_function_scope_info(&body, &params);
 
         // Get the global name map to pass to the function preparer
         // At module level, use our own name_map; otherwise use the inherited global_name_map
@@ -458,18 +560,92 @@ impl Prepare {
             self.global_name_map.clone().unwrap_or_default()
         };
 
+        // Build enclosing_locals: names that are local to this scope (including params)
+        // These are available for `nonlocal` declarations in nested functions
+        let enclosing_locals: AHashSet<String> = if self.is_module_scope {
+            // At module level, there are no enclosing locals for nonlocal
+            // (module-level variables are accessed via `global`, not `nonlocal`)
+            AHashSet::new()
+        } else {
+            // In a function: our params + assigned_names + existing name_map keys
+            // are all potentially available as enclosing locals
+            let mut locals = self.assigned_names.clone();
+            for key in self.name_map.keys() {
+                locals.insert(key.clone());
+            }
+            locals
+        };
+
         // Pass 2: Create child preparer for function body with scope info
-        let mut prepare = Prepare::new_function(body.len(), &params, assigned_names, global_names, global_name_map);
+        let mut inner_prepare = Prepare::new_function(
+            body.len(),
+            &params,
+            scope_info.assigned_names,
+            scope_info.global_names,
+            scope_info.nonlocal_names,
+            global_name_map,
+            Some(enclosing_locals),
+            scope_info.cell_var_names,
+        );
 
         // Prepare the function body
-        let prepared_body = prepare.prepare_nodes(body)?;
+        let prepared_body = inner_prepare.prepare_nodes(body)?;
+
+        // Mark variables that the inner function captures as our cell_vars
+        // These are the names that appear in inner_prepare.free_var_map
+        // Add to cell_var_map if not already present (may have been pre-populated or added earlier)
+        for captured_name in inner_prepare.free_var_map.keys() {
+            if !self.cell_var_map.contains_key(captured_name) && !self.free_var_map.contains_key(captured_name) {
+                // Only add to cell_var_map if not already a free_var (pass-through case)
+                // Allocate a namespace slot for the cell reference
+                let slot = match self.name_map.entry(captured_name.clone()) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => {
+                        let slot = self.namespace_size;
+                        self.namespace_size += 1;
+                        e.insert(slot);
+                        slot
+                    }
+                };
+                self.cell_var_map.insert(captured_name.clone(), slot);
+            }
+        }
+
+        // Build free_var_enclosing_slots: enclosing namespace slots for captured variables
+        // At call time, cells are pushed sequentially, so we only need the enclosing slots.
+        // Sort by our slot index to ensure consistent ordering (matches namespace layout).
+        let mut free_var_entries: Vec<_> = inner_prepare.free_var_map.into_iter().collect();
+        free_var_entries.sort_by_key(|(_, our_slot)| *our_slot);
+
+        let free_var_enclosing_slots: Vec<usize> = free_var_entries
+            .into_iter()
+            .map(|(var_name, _our_slot)| {
+                // Determine the namespace slot in the enclosing scope where the cell reference lives:
+                // - If it's in cell_var_map, it's a cell we own (allocated in this scope)
+                // - If it's in free_var_map, it's a cell we captured from further up
+                // - Otherwise, this is a prepare-time bug
+                if let Some(&slot) = self.cell_var_map.get(&var_name) {
+                    slot
+                } else if let Some(&slot) = self.free_var_map.get(&var_name) {
+                    slot
+                } else {
+                    panic!("free_var '{var_name}' not found in enclosing scope's cell_var_map or free_var_map");
+                }
+            })
+            .collect();
+
+        // cell_var_count: number of cells to create at call time for variables captured by nested functions
+        // Slots are implicitly params.len()..params.len()+cell_var_count in the namespace layout
+        let cell_var_count = inner_prepare.cell_var_map.len();
 
         // Return the final FunctionDef node
         Ok(Node::FunctionDef(Function::new(
             name,
             params,
             prepared_body,
-            prepare.namespace_size,
+            inner_prepare.namespace_size,
+            free_var_enclosing_slots,
+            cell_var_count,
         )))
     }
 
@@ -481,6 +657,7 @@ impl Prepare {
     ///
     /// **In functions:**
     /// - If name is declared `global` → resolve to global namespace
+    /// - If name is declared `nonlocal` → resolve to enclosing scope via Cell
     /// - If name is assigned in this function → resolve to local namespace
     /// - If name exists in global namespace (read-only access) → resolve to global namespace
     /// - Otherwise → resolve to local namespace (will be NameError at runtime)
@@ -507,7 +684,7 @@ impl Prepare {
             );
         }
 
-        // In a function: determine scope based on global_names, assigned_names, global_name_map
+        // In a function: determine scope based on global_names, nonlocal_names, assigned_names, global_name_map
 
         // 1. Check if declared `global`
         if self.global_names.contains(&name_str) {
@@ -543,7 +720,28 @@ impl Prepare {
             );
         }
 
-        // 2. Check if assigned in this function (local variable)
+        // 2. Check if captured from enclosing scope (nonlocal declaration or implicit capture)
+        // free_var_map stores namespace slot indices where the cell reference will be stored
+        if let Some(&slot) = self.free_var_map.get(&name_str) {
+            // At runtime, the cell reference is in namespace[slot] as Value::Ref(cell_id)
+            return (
+                Identifier::new_with_scope(ident.name, ident.position, slot, NameScope::Cell),
+                false, // Not a new local - it's captured from enclosing scope
+            );
+        }
+
+        // 3. Check if this is a cell variable (captured by nested functions)
+        // cell_var_map stores namespace slot indices where the cell reference will be stored
+        // At call time, a cell is created and stored as Value::Ref(cell_id) at this slot
+        if let Some(&slot) = self.cell_var_map.get(&name_str) {
+            // The namespace slot was already allocated when cell_var_map was populated
+            return (
+                Identifier::new_with_scope(ident.name, ident.position, slot, NameScope::Cell),
+                false, // Not a "new" local - it's a cell variable
+            );
+        }
+
+        // 4. Check if assigned in this function (local variable)
         if self.assigned_names.contains(&name_str) {
             let (id, is_new) = match self.name_map.entry(name_str) {
                 Entry::Occupied(e) => (*e.get(), false),
@@ -560,7 +758,29 @@ impl Prepare {
             );
         }
 
-        // 3. Check if exists in global namespace (implicit global read)
+        // 5. Check if exists in enclosing scope (implicit closure capture)
+        // This handles reading variables from enclosing functions without explicit `nonlocal`
+        if let Some(ref enclosing) = self.enclosing_locals {
+            if enclosing.contains(&name_str) {
+                // This is an implicit capture - add to free_var_map with a namespace slot
+                let slot = if let Some(&existing_slot) = self.free_var_map.get(&name_str) {
+                    existing_slot
+                } else {
+                    // Allocate a namespace slot for this free variable
+                    let slot = self.namespace_size;
+                    self.namespace_size += 1;
+                    self.name_map.insert(name_str.clone(), slot);
+                    self.free_var_map.insert(name_str, slot);
+                    slot
+                };
+                return (
+                    Identifier::new_with_scope(ident.name, ident.position, slot, NameScope::Cell),
+                    false, // Not a new local - it's captured from enclosing scope
+                );
+            }
+        }
+
+        // 6. Check if exists in global namespace (implicit global read)
         if let Some(ref global_map) = self.global_name_map {
             if let Some(&global_id) = global_map.get(&name_str) {
                 return (
@@ -570,7 +790,7 @@ impl Prepare {
             }
         }
 
-        // 4. Name not found anywhere - resolve to local (will be NameError at runtime)
+        // 7. Name not found anywhere - resolve to local (will be NameError at runtime)
         let (id, is_new) = match self.name_map.entry(name_str) {
             Entry::Occupied(e) => (*e.get(), false),
             Entry::Vacant(e) => {
@@ -617,38 +837,80 @@ impl Prepare {
     }
 }
 
+/// Information collected from first-pass scan of a function body.
+///
+/// This struct holds the scope-related information needed for the second pass
+/// of function preparation and for closure analysis.
+#[allow(clippy::struct_field_names)] // Field names are descriptive and consistent with Python terminology
+struct FunctionScopeInfo {
+    /// Names declared as `global`
+    global_names: AHashSet<String>,
+    /// Names declared as `nonlocal`
+    nonlocal_names: AHashSet<String>,
+    /// Names that are assigned in this scope
+    assigned_names: AHashSet<String>,
+    /// Names that are captured by nested functions (must be stored in cells)
+    cell_var_names: AHashSet<String>,
+}
+
 /// Scans a function body to collect scope information (first pass of two-pass preparation).
 ///
 /// This function recursively walks the AST to find:
 /// - Names declared as `global` (from Global statements)
+/// - Names declared as `nonlocal` (from Nonlocal statements)
 /// - Names that are assigned (from Assign, OpAssign, For targets, etc.)
+/// - Names that are captured by nested functions (cell_var_names)
 ///
 /// This information is used to determine whether each name reference should resolve
-/// to the local namespace or the global namespace.
-///
-/// # Returns
-/// A tuple of (global_names, assigned_names) as HashSets.
-fn collect_function_scope_info(nodes: &[ParseNode<'_>]) -> (AHashSet<String>, AHashSet<String>) {
+/// to the local namespace, global namespace, or an enclosing scope via cells.
+fn collect_function_scope_info(nodes: &[ParseNode<'_>], params: &[&str]) -> FunctionScopeInfo {
     let mut global_names = AHashSet::new();
+    let mut nonlocal_names = AHashSet::new();
     let mut assigned_names = AHashSet::new();
+    let mut cell_var_names = AHashSet::new();
 
+    // First pass: collect global, nonlocal, and assigned names
     for node in nodes {
-        collect_scope_info_from_node(node, &mut global_names, &mut assigned_names);
+        collect_scope_info_from_node(node, &mut global_names, &mut nonlocal_names, &mut assigned_names);
     }
 
-    (global_names, assigned_names)
+    // Build the set of our locals: params + assigned_names (excluding globals)
+    let our_locals: AHashSet<String> = params
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(assigned_names.iter().cloned())
+        .filter(|name| !global_names.contains(name))
+        .collect();
+
+    // Second pass: find what nested functions capture from us
+    for node in nodes {
+        collect_cell_vars_from_node(node, &our_locals, &mut cell_var_names);
+    }
+
+    FunctionScopeInfo {
+        global_names,
+        nonlocal_names,
+        assigned_names,
+        cell_var_names,
+    }
 }
 
 /// Helper to collect scope info from a single node.
 fn collect_scope_info_from_node(
     node: &ParseNode<'_>,
     global_names: &mut AHashSet<String>,
+    nonlocal_names: &mut AHashSet<String>,
     assigned_names: &mut AHashSet<String>,
 ) {
     match node {
         ParseNode::Global(names) => {
             for name in names {
                 global_names.insert((*name).to_string());
+            }
+        }
+        ParseNode::Nonlocal(names) => {
+            for name in names {
+                nonlocal_names.insert((*name).to_string());
             }
         }
         ParseNode::Assign { target, .. } => {
@@ -667,19 +929,19 @@ fn collect_scope_info_from_node(
             assigned_names.insert(target.name.to_string());
             // Recurse into body and else
             for n in body {
-                collect_scope_info_from_node(n, global_names, assigned_names);
+                collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names);
             }
             for n in or_else {
-                collect_scope_info_from_node(n, global_names, assigned_names);
+                collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names);
             }
         }
         ParseNode::If { body, or_else, .. } => {
             // Recurse into branches
             for n in body {
-                collect_scope_info_from_node(n, global_names, assigned_names);
+                collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names);
             }
             for n in or_else {
-                collect_scope_info_from_node(n, global_names, assigned_names);
+                collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names);
             }
         }
         ParseNode::FunctionDef { name, .. } => {
@@ -694,5 +956,209 @@ fn collect_scope_info_from_node(
         | ParseNode::ReturnNone
         | ParseNode::Raise(_)
         | ParseNode::Assert { .. } => {}
+    }
+}
+
+/// Collects cell_vars by analyzing what nested functions capture from our scope.
+///
+/// For each FunctionDef node, we recursively analyze its body to find what names it
+/// references. Any name that is in `our_locals` and referenced by the nested function
+/// (not as a local of the nested function) becomes a cell_var.
+fn collect_cell_vars_from_node(node: &ParseNode<'_>, our_locals: &AHashSet<String>, cell_vars: &mut AHashSet<String>) {
+    match node {
+        ParseNode::FunctionDef { params, body, .. } => {
+            // Find what names are referenced inside this nested function
+            let mut referenced = AHashSet::new();
+            for n in body {
+                collect_referenced_names_from_node(n, &mut referenced);
+            }
+
+            // Collect the nested function's own locals (params + assigned)
+            let nested_scope = collect_function_scope_info(body, params);
+
+            // Any name that is:
+            // - Referenced by the nested function
+            // - Not a local of the nested function
+            // - Not declared global in the nested function
+            // - In our locals
+            // becomes a cell_var
+            for name in &referenced {
+                if !nested_scope.assigned_names.contains(name)
+                    && !params.contains(&name.as_str())
+                    && !nested_scope.global_names.contains(name)
+                    && our_locals.contains(name)
+                {
+                    cell_vars.insert(name.clone());
+                }
+            }
+
+            // Also check what the nested function explicitly declares as nonlocal
+            for name in &nested_scope.nonlocal_names {
+                if our_locals.contains(name) {
+                    cell_vars.insert(name.clone());
+                }
+            }
+        }
+        // Recurse into control flow structures
+        ParseNode::For { body, or_else, .. } => {
+            for n in body {
+                collect_cell_vars_from_node(n, our_locals, cell_vars);
+            }
+            for n in or_else {
+                collect_cell_vars_from_node(n, our_locals, cell_vars);
+            }
+        }
+        ParseNode::If { body, or_else, .. } => {
+            for n in body {
+                collect_cell_vars_from_node(n, our_locals, cell_vars);
+            }
+            for n in or_else {
+                collect_cell_vars_from_node(n, our_locals, cell_vars);
+            }
+        }
+        // Other nodes don't contain nested function definitions
+        _ => {}
+    }
+}
+
+/// Collects all names referenced (read) in a node and its descendants.
+///
+/// This is used to find what names a nested function references from enclosing scopes.
+fn collect_referenced_names_from_node(node: &ParseNode<'_>, referenced: &mut AHashSet<String>) {
+    match node {
+        ParseNode::Expr(expr) => collect_referenced_names_from_expr(expr, referenced),
+        ParseNode::Return(expr) => collect_referenced_names_from_expr(expr, referenced),
+        ParseNode::Raise(Some(expr)) => collect_referenced_names_from_expr(expr, referenced),
+        ParseNode::Raise(None) => {}
+        ParseNode::Assert { test, msg } => {
+            collect_referenced_names_from_expr(test, referenced);
+            if let Some(m) = msg {
+                collect_referenced_names_from_expr(m, referenced);
+            }
+        }
+        ParseNode::Assign { object, .. } => {
+            collect_referenced_names_from_expr(object, referenced);
+        }
+        ParseNode::OpAssign { target, object, .. } => {
+            // OpAssign reads the target before writing
+            referenced.insert(target.name.to_string());
+            collect_referenced_names_from_expr(object, referenced);
+        }
+        ParseNode::SubscriptAssign { target, index, value } => {
+            referenced.insert(target.name.to_string());
+            collect_referenced_names_from_expr(index, referenced);
+            collect_referenced_names_from_expr(value, referenced);
+        }
+        ParseNode::For {
+            iter, body, or_else, ..
+        } => {
+            collect_referenced_names_from_expr(iter, referenced);
+            for n in body {
+                collect_referenced_names_from_node(n, referenced);
+            }
+            for n in or_else {
+                collect_referenced_names_from_node(n, referenced);
+            }
+        }
+        ParseNode::If { test, body, or_else } => {
+            collect_referenced_names_from_expr(test, referenced);
+            for n in body {
+                collect_referenced_names_from_node(n, referenced);
+            }
+            for n in or_else {
+                collect_referenced_names_from_node(n, referenced);
+            }
+        }
+        ParseNode::FunctionDef { .. } => {
+            // Don't recurse into nested function bodies - they have their own scope
+        }
+        ParseNode::Pass | ParseNode::ReturnNone | ParseNode::Global(_) | ParseNode::Nonlocal(_) => {}
+    }
+}
+
+/// Collects all names referenced in an expression.
+fn collect_referenced_names_from_expr(expr: &crate::expressions::ExprLoc<'_>, referenced: &mut AHashSet<String>) {
+    use crate::expressions::Expr;
+    match &expr.expr {
+        Expr::Name(ident) => {
+            referenced.insert(ident.name.to_string());
+        }
+        Expr::Literal(_) => {}
+        Expr::Callable(callable) => {
+            // Check if the callable is a Name reference
+            if let crate::callable::Callable::Name(ident) = callable {
+                referenced.insert(ident.name.to_string());
+            }
+        }
+        Expr::List(items) | Expr::Tuple(items) => {
+            for item in items {
+                collect_referenced_names_from_expr(item, referenced);
+            }
+        }
+        Expr::Dict(pairs) => {
+            for (key, value) in pairs {
+                collect_referenced_names_from_expr(key, referenced);
+                collect_referenced_names_from_expr(value, referenced);
+            }
+        }
+        Expr::Op { left, right, .. } | Expr::CmpOp { left, right, .. } => {
+            collect_referenced_names_from_expr(left, referenced);
+            collect_referenced_names_from_expr(right, referenced);
+        }
+        Expr::Not(operand) | Expr::UnaryMinus(operand) => {
+            collect_referenced_names_from_expr(operand, referenced);
+        }
+        Expr::FString(parts) => {
+            collect_referenced_names_from_fstring_parts(parts, referenced);
+        }
+        Expr::Subscript { object, index } => {
+            collect_referenced_names_from_expr(object, referenced);
+            collect_referenced_names_from_expr(index, referenced);
+        }
+        Expr::Call { callable, args } => {
+            // Check if the callable is a Name reference
+            if let crate::callable::Callable::Name(ident) = callable {
+                referenced.insert(ident.name.to_string());
+            }
+            collect_referenced_names_from_args(args, referenced);
+        }
+        Expr::AttrCall { object, args, .. } => {
+            referenced.insert(object.name.to_string());
+            collect_referenced_names_from_args(args, referenced);
+        }
+    }
+}
+
+/// Collects referenced names from argument expressions.
+fn collect_referenced_names_from_args(args: &crate::args::ArgExprs<'_>, referenced: &mut AHashSet<String>) {
+    use crate::args::ArgExprs;
+    match args {
+        ArgExprs::Zero => {}
+        ArgExprs::One(e) => collect_referenced_names_from_expr(e, referenced),
+        ArgExprs::Two(e1, e2) => {
+            collect_referenced_names_from_expr(e1, referenced);
+            collect_referenced_names_from_expr(e2, referenced);
+        }
+        ArgExprs::Args(exprs) => {
+            for e in exprs {
+                collect_referenced_names_from_expr(e, referenced);
+            }
+        }
+        ArgExprs::Kwargs(_) | ArgExprs::ArgsKargs { .. } => {
+            // TODO: handle kwargs when needed
+        }
+    }
+}
+
+/// Collects referenced names from f-string parts (both expressions and dynamic format specs).
+fn collect_referenced_names_from_fstring_parts(parts: &[FStringPart<'_>], referenced: &mut AHashSet<String>) {
+    for part in parts {
+        if let FStringPart::Interpolation { expr, format_spec, .. } = part {
+            collect_referenced_names_from_expr(expr, referenced);
+            // Also check dynamic format specs which can contain interpolated expressions
+            if let Some(FormatSpec::Dynamic(spec_parts)) = format_spec {
+                collect_referenced_names_from_fstring_parts(spec_parts, referenced);
+            }
+        }
     }
 }

@@ -17,14 +17,8 @@ use crate::fstring::FStringPart;
 /// - Variables assigned in a function are Local (unless declared `global`)
 /// - Variables only read (not assigned) that exist at module level are Global
 /// - The `global` keyword explicitly marks a variable as Global
-///
-/// # Future: `nonlocal` Support
-///
-/// To support `nonlocal`, add an `Enclosing(usize)` variant where the usize is the
-/// namespace index of the enclosing function. The prepare phase would need to track
-/// enclosing function namespace indices when resolving nonlocal declarations.
-///
-/// TODO: Add Enclosing(usize) variant for nonlocal support
+/// - Variables declared `nonlocal` or implicitly captured from enclosing scopes
+///   are accessed through Cells
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) enum NameScope {
     /// Variable is in the current frame's local namespace
@@ -32,7 +26,15 @@ pub(crate) enum NameScope {
     Local,
     /// Variable is in the module-level global namespace
     Global,
-    // TODO: Enclosing(usize) for nonlocal support - index into Namespaces
+    /// Variable accessed through a cell (heap-allocated container).
+    ///
+    /// Used for both:
+    /// - Variables captured from enclosing scopes (free variables)
+    /// - Variables in this function that are captured by nested functions (cell variables)
+    ///
+    /// The namespace slot contains `Value::Ref(cell_id)` pointing to a `HeapData::Cell`.
+    /// Access requires dereferencing through the cell.
+    Cell,
 }
 
 #[derive(Debug, Clone)]

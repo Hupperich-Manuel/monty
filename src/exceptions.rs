@@ -71,6 +71,14 @@ impl ExcType {
         exc_fmt!(Self::TypeError; "'{type_str}' object is not subscriptable").into()
     }
 
+    /// Creates a TypeError for item assignment on types that don't support it.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object does not support item assignment`
+    #[must_use]
+    pub fn type_error_not_sub_assignment(type_str: &str) -> RunError<'static> {
+        exc_fmt!(Self::TypeError; "'{type_str}' object does not support item assignment").into()
+    }
+
     /// Creates a TypeError for unhashable types (e.g., list, dict used as dict keys).
     ///
     /// This matches Python's error message: `TypeError: unhashable type: 'list'`
@@ -200,6 +208,47 @@ impl ExcType {
     pub fn syntax_error_used_before_global<'c>(name: &str) -> SimpleException<'c> {
         exc_fmt!(Self::SyntaxError; "name '{}' is used prior to global declaration", name)
     }
+
+    /// Creates a SyntaxError for nonlocal declaration at module level.
+    ///
+    /// Matches CPython's format: `SyntaxError: nonlocal declaration not allowed at module level`
+    #[must_use]
+    pub fn syntax_error_nonlocal_at_module<'c>() -> SimpleException<'c> {
+        exc_static!(Self::SyntaxError; "nonlocal declaration not allowed at module level")
+    }
+
+    /// Creates a SyntaxError when nonlocal variable doesn't exist in enclosing scope.
+    ///
+    /// Matches CPython's format: `SyntaxError: no binding for nonlocal 'x' found`
+    #[must_use]
+    pub fn syntax_error_no_binding_nonlocal<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::SyntaxError; "no binding for nonlocal '{}' found", name)
+    }
+
+    /// Creates a SyntaxError for assigning before nonlocal declaration.
+    ///
+    /// Matches CPython's format: `SyntaxError: name 'x' is assigned to before nonlocal declaration`
+    #[must_use]
+    pub fn syntax_error_assigned_before_nonlocal<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::SyntaxError; "name '{}' is assigned to before nonlocal declaration", name)
+    }
+
+    /// Creates a SyntaxError for using a name before the nonlocal declaration.
+    ///
+    /// Matches CPython's format: `SyntaxError: name 'x' is used prior to nonlocal declaration`
+    #[must_use]
+    pub fn syntax_error_used_before_nonlocal<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::SyntaxError; "name '{}' is used prior to nonlocal declaration", name)
+    }
+
+    /// Creates a NameError for accessing a free variable (nonlocal/closure) before it's assigned.
+    ///
+    /// Matches CPython's format: `NameError: cannot access free variable 'x' where it is not
+    /// associated with a value in enclosing scope`
+    #[must_use]
+    pub fn name_error_free_variable<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::NameError; "cannot access free variable '{}' where it is not associated with a value in enclosing scope", name)
+    }
 }
 
 /// Simple lightweight representation of an exception.
@@ -311,6 +360,24 @@ impl<'c> SimpleException<'c> {
             exc_fmt!(ExcType::TypeError; "'{op}' not supported between instances of '{left_type}' and '{right_type}'");
 
         Err(e.with_position(new_position).into())
+    }
+
+    /// Creates a TypeError for augmented assignment operator type mismatches (e.g., `+=`).
+    ///
+    /// For `+=` with str/list on the left side, uses CPython's special format:
+    /// `can only concatenate {type} (not "{other}") to {type}`
+    ///
+    /// For other cases, uses the generic format:
+    /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`
+    ///
+    /// Returns a `SimpleException` without frame info - caller should add the frame.
+    pub(crate) fn augmented_assign_type_error(op: &Operator, left_type: &str, right_type: &str) -> Self {
+        let message = if *op == Operator::Add && (left_type == "str" || left_type == "list") {
+            format!("can only concatenate {left_type} (not \"{right_type}\") to {left_type}")
+        } else {
+            format!("unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
+        };
+        Self::new(ExcType::TypeError, Some(message.into()))
     }
 }
 

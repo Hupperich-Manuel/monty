@@ -19,13 +19,10 @@ pub const GLOBAL_NS_IDX: usize = 0;
 /// we use indices into this central namespaces. Since variable scope (Local vs Global)
 /// is known at compile time, we only ever need one mutable reference at a time.
 ///
-/// # Future: `nonlocal` Support
+/// # Closure Support
 ///
-/// This design naturally extends to support `nonlocal` by tracking enclosing
-/// function namespace indices. The `NameScope` enum can be extended with
-/// `Enclosing(usize)` to directly reference enclosing function namespaces.
-///
-/// TODO: Add enclosing namespace tracking for `nonlocal` support
+/// Variables captured by closures are stored in cells on the heap, not in namespaces.
+/// The `get_var_value` method handles both namespace-based and cell-based variable access.
 #[derive(Debug)]
 pub struct Namespaces<'c, 'e> {
     namespaces: Vec<Vec<Value<'c, 'e>>>,
@@ -41,6 +38,17 @@ impl<'c, 'e> Namespaces<'c, 'e> {
         }
     }
 
+    /// Gets an immutable slice reference to a namespace by index.
+    ///
+    /// Used for reading from the enclosing namespace when defining closures,
+    /// without requiring mutable access.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds.
+    pub fn get(&self, idx: usize) -> &[Value<'c, 'e>] {
+        self.namespaces[idx].as_slice()
+    }
+
     /// Gets a mutable slice reference to a namespace by index.
     ///
     /// # Panics
@@ -52,9 +60,7 @@ impl<'c, 'e> Namespaces<'c, 'e> {
     /// Creates a new namespace for a function call, returns its index.
     ///
     /// The new namespace is initialized with `Object::Undefined` values.
-    /// Call `pop()` when the function returns to clean up.
-    ///
-    /// TODO: For `nonlocal` support, consider tracking parent namespace indices here
+    /// Call `pop_with_heap()` when the function returns to clean up.
     pub fn push(&mut self, namespace: Vec<Value<'c, 'e>>) -> usize {
         let idx = self.namespaces.len();
         self.namespaces.push(namespace);
@@ -105,7 +111,10 @@ impl<'c, 'e> Namespaces<'c, 'e> {
         let ns_idx = match ident.scope {
             NameScope::Local => local_idx,
             NameScope::Global => GLOBAL_NS_IDX,
-            // TODO: NameScope::Enclosing(idx) => idx,
+            NameScope::Cell => {
+                // Cell access should use get_var_value which handles cell dereferencing
+                panic!("Cell access should use get_var_value, not get_var_mut");
+            }
         };
         let namespace = self.get_mut(ns_idx);
 
@@ -117,6 +126,57 @@ impl<'c, 'e> Namespaces<'c, 'e> {
         Err(SimpleException::new(ExcType::NameError, Some(ident.name.into()))
             .with_position(ident.position)
             .into())
+    }
+
+    /// Gets a variable's value, handling Local, Global, and Cell scopes.
+    ///
+    /// This is the primary method for reading variable values during expression evaluation.
+    /// It handles all scope types:
+    /// - `Local` - reads directly from the local namespace
+    /// - `Global` - reads directly from the global namespace (index 0)
+    /// - `Cell` - namespace slot contains `Value::Ref(cell_id)`, reads through the cell
+    ///
+    /// # Arguments
+    /// * `local_idx` - Index of the local namespace in namespaces
+    /// * `heap` - The heap for cell access and cloning ref-counted values
+    /// * `ident` - The identifier to look up (contains heap_id and scope)
+    ///
+    /// # Returns
+    /// A cloned copy of the value (with refcount incremented for Ref values), or NameError if undefined.
+    pub fn get_var_value(
+        &mut self,
+        local_idx: usize,
+        heap: &mut Heap<'c, 'e>,
+        ident: &Identifier<'c>,
+    ) -> RunResult<'c, Value<'c, 'e>> {
+        // Determine which namespace to use
+        let ns_idx = match ident.scope {
+            NameScope::Global => GLOBAL_NS_IDX,
+            _ => local_idx, // Local and Cell both use local namespace
+        };
+
+        match ident.scope {
+            NameScope::Cell => {
+                // Cell access - namespace slot contains Value::Ref(cell_id)
+                let namespace = &self.namespaces[ns_idx];
+                if let Value::Ref(cell_id) = namespace[ident.heap_id()] {
+                    let value = heap.get_cell_value(cell_id);
+                    // Cell may be undefined if accessed before assignment in enclosing scope
+                    if matches!(value, Value::Undefined) {
+                        Err(ExcType::name_error_free_variable(ident.name).into())
+                    } else {
+                        Ok(value)
+                    }
+                } else {
+                    panic!("Cell variable slot doesn't contain a cell reference - prepare-time bug");
+                }
+            }
+            _ => {
+                // Local or Global scope - direct namespace access
+                self.get_var_mut(ns_idx, ident)
+                    .map(|object| object.clone_with_heap(heap))
+            }
+        }
     }
 
     /// Returns the global namespace for final inspection (e.g., ref-count testing).

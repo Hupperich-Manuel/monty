@@ -208,6 +208,11 @@ impl PyObject {
                     }
                     Self::Dict(new_dict)
                 }
+                // Cells are internal closure implementation details
+                HeapData::Cell(inner) => {
+                    // Show the cell's contents
+                    PyObject::from_value(inner, heap)
+                }
             },
             #[cfg(feature = "dec-ref-check")]
             Value::Dereferenced => panic!("Dereferenced found while converting to PyObject"),

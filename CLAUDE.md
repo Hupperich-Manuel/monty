@@ -111,6 +111,11 @@ Container types (`List`, `Tuple`, `Dict`) also have `clone_with_heap()` methods.
 
 ## NOTES
 
+ALWAYS consider code quality when adding new code, if functions are getting too complex or code is duplicated, move relevant logic to a new file.
+Make sure functions are added in the most logical place, e.g. as methods on a struct where appropriate.
+
+The code should follow the "newspaper" style where public and primary functions are at the top of the file, followed by private functions and utilities.
+
 ALWAYS run `make lint` after making changes and fix all suggestions to maintain code quality.
 
 ALWAYS update this file when it is out of date.

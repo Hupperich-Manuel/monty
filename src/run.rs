@@ -20,14 +20,15 @@ pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 /// In functions, `local_idx` points to the function's local namespace.
 /// Global variables always use `GLOBAL_NS_IDX` (0) directly.
 ///
-/// # Future: `nonlocal` Support
+/// # Closure Support
 ///
-/// This design naturally extends to support `nonlocal` by adding an
-/// `enclosing_idx: Option<usize>` field for nested functions.
-/// The `NameScope` enum can then include `Enclosing(usize)` to access
-/// enclosing function namespaces.
+/// Cell variables (for closures) are stored directly in the namespace as
+/// `Value::Ref(cell_id)` pointing to a `HeapData::Cell`. Both captured cells
+/// (from enclosing scopes) and owned cells (for variables captured by nested
+/// functions) are injected into the namespace at function call time.
 ///
-/// TODO: Add enclosing_idx field for nonlocal support
+/// When accessing a variable with `NameScope::Cell`, we look up the namespace
+/// slot to get the `Value::Ref(cell_id)`, then read/write through that cell.
 #[derive(Debug)]
 pub(crate) struct RunFrame<'c> {
     /// Index of this frame's local namespace in Namespaces.
@@ -55,7 +56,13 @@ impl<'c> RunFrame<'c> {
     /// The function's local namespace is at `local_idx`. Global variables
     /// always use `GLOBAL_NS_IDX` directly.
     ///
-    /// TODO: Add enclosing_idx parameter for nonlocal support in nested functions
+    /// Cell variables (for closures) are already injected into the namespace
+    /// by Function::call or Function::call_with_cells before this frame is created.
+    ///
+    /// # Arguments
+    /// * `local_idx` - Index of the function's local namespace in Namespaces
+    /// * `name` - The function name (for error messages)
+    /// * `parent` - Parent stack frame for error traceback
     pub fn new_for_function(local_idx: usize, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
         Self {
             local_idx,
@@ -238,14 +245,26 @@ impl<'c> RunFrame<'c> {
         'c: 'e,
     {
         let new_value = self.execute_expr(namespaces, heap, expr)?;
+
+        // Determine which namespace to use
         let ns_idx = match target.scope {
-            NameScope::Local => self.local_idx,
             NameScope::Global => GLOBAL_NS_IDX,
+            _ => self.local_idx, // Local and Cell both use local namespace
         };
-        let namespace = namespaces.get_mut(ns_idx);
-        let old_value = std::mem::replace(&mut namespace[target.heap_id()], new_value);
-        // Drop the old value properly (dec_ref for Refs, no-op for others)
-        old_value.drop_with_heap(heap);
+
+        if target.scope == NameScope::Cell {
+            // Cell assignment - look up cell HeapId from namespace slot, then write through it
+            let namespace = namespaces.get_mut(ns_idx);
+            let Value::Ref(cell_id) = namespace[target.heap_id()] else {
+                panic!("Cell variable slot doesn't contain a cell reference - prepare-time bug")
+            };
+            heap.set_cell_value(cell_id, new_value);
+        } else {
+            // Direct assignment to namespace slot (Local or Global)
+            let namespace = namespaces.get_mut(ns_idx);
+            let old_value = std::mem::replace(&mut namespace[target.heap_id()], new_value);
+            old_value.drop_with_heap(heap);
+        }
         Ok(())
     }
 
@@ -261,19 +280,45 @@ impl<'c> RunFrame<'c> {
         'c: 'e,
     {
         let rhs = self.execute_expr(namespaces, heap, expr)?;
-        let target_val = namespaces.get_var_mut(self.local_idx, target)?;
-        let ok = match op {
-            Operator::Add => target_val.py_iadd(rhs, heap, None),
-            _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
-        };
-        if ok {
-            Ok(())
+        // Capture rhs type before it's consumed by py_iadd
+        let rhs_type = rhs.py_type(heap);
+
+        // Cell variables need special handling - read through cell, modify, write back
+        let err_target_type = if target.scope == NameScope::Cell {
+            let namespace = namespaces.get_mut(self.local_idx);
+            let Value::Ref(cell_id) = namespace[target.heap_id()] else {
+                panic!("Cell variable slot doesn't contain a cell reference - prepare-time bug")
+            };
+            let mut cell_value = heap.get_cell_value(cell_id);
+            let ok = match op {
+                Operator::Add => cell_value.py_iadd(rhs, heap, None),
+                _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
+            };
+            if ok {
+                heap.set_cell_value(cell_id, cell_value);
+                None
+            } else {
+                Some(cell_value.py_type(heap))
+            }
         } else {
-            // TODO this should probably move into exception.rs
-            let target_type = target_val.py_type(heap);
-            let right_type = target_val.py_type(heap);
-            let e = exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
+            // Direct access for Local/Global scopes
+            let target_val = namespaces.get_var_mut(self.local_idx, target)?;
+            let ok = match op {
+                Operator::Add => target_val.py_iadd(rhs, heap, None),
+                _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
+            };
+            if ok {
+                None
+            } else {
+                Some(target_val.py_type(heap))
+            }
+        };
+
+        if let Some(target_type) = err_target_type {
+            let e = SimpleException::augmented_assign_type_error(op, target_type, rhs_type);
             Err(e.with_frame(self.stack_frame(&expr.position)).into())
+        } else {
+            Ok(())
         }
     }
 
@@ -345,6 +390,17 @@ impl<'c> RunFrame<'c> {
         Ok(())
     }
 
+    /// Defines a function (or closure) by storing it in the namespace.
+    ///
+    /// If the function has free_var_enclosing_slots (captures variables from enclosing scope),
+    /// this captures the cells from the enclosing namespace and stores a Closure.
+    /// Otherwise, it stores a simple Function reference.
+    ///
+    /// # Cell Sharing
+    ///
+    /// Closures share cells with their enclosing scope. The cell HeapIds are
+    /// looked up from the enclosing namespace slots specified in free_var_enclosing_slots.
+    /// This ensures modifications through `nonlocal` are visible to both scopes.
     fn define_function<'e>(
         &self,
         namespaces: &mut Namespaces<'c, 'e>,
@@ -353,8 +409,31 @@ impl<'c> RunFrame<'c> {
     ) where
         'c: 'e,
     {
+        let new_value = if function.is_closure() {
+            // This function captures variables from enclosing scopes.
+            // Look up the cell HeapIds from the enclosing namespace.
+            let enclosing_namespace = namespaces.get(self.local_idx);
+            let mut captured_cells = Vec::with_capacity(function.free_var_enclosing_slots.len());
+
+            for &enclosing_slot in &function.free_var_enclosing_slots {
+                // The enclosing namespace slot contains Value::Ref(cell_id)
+                let Value::Ref(cell_id) = enclosing_namespace[enclosing_slot] else {
+                    panic!("Expected cell in enclosing namespace slot {enclosing_slot} - prepare-time bug")
+                };
+
+                // Increment the cell's refcount since this closure now holds a reference
+                heap.inc_ref(cell_id);
+                captured_cells.push(cell_id);
+            }
+
+            Value::Closure(function, captured_cells)
+        } else {
+            // Simple function without captures
+            Value::Function(function)
+        };
+
         let namespace = namespaces.get_mut(self.local_idx);
-        let old_value = std::mem::replace(&mut namespace[function.name.heap_id()], Value::Function(function));
+        let old_value = std::mem::replace(&mut namespace[function.name.heap_id()], new_value);
         // Drop the old value properly (dec_ref for Refs, no-op for others)
         old_value.drop_with_heap(heap);
     }

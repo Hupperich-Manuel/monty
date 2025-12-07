@@ -66,6 +66,11 @@ pub(crate) enum ParseNode<'c> {
     /// Declares that the listed names refer to module-level (global) variables,
     /// allowing functions to read and write them instead of creating local variables.
     Global(Vec<&'c str>),
+    /// Nonlocal variable declaration.
+    ///
+    /// Declares that the listed names refer to variables in enclosing function scopes,
+    /// allowing nested functions to read and write them instead of creating local variables.
+    Nonlocal(Vec<&'c str>),
 }
 
 pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> Result<Vec<ParseNode<'c>>, ParseError<'c>> {
@@ -241,7 +246,10 @@ impl<'c> Parser<'c> {
                 let names = names.iter().map(|id| &self.code[id.range]).collect();
                 Ok(ParseNode::Global(names))
             }
-            Stmt::Nonlocal(_) => Err(ParseError::Todo("Nonlocal")),
+            Stmt::Nonlocal(ast::StmtNonlocal { names, .. }) => {
+                let names = names.iter().map(|id| &self.code[id.range]).collect();
+                Ok(ParseNode::Nonlocal(names))
+            }
             Stmt::Expr(ast::StmtExpr { value, .. }) => Ok(ParseNode::Expr(self.parse_expression(*value)?)),
             Stmt::Pass(_) => Ok(ParseNode::Pass),
             Stmt::Break(_) => Err(ParseError::Todo("Break")),

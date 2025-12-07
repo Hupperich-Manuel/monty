@@ -42,9 +42,16 @@ pub enum Value<'c, 'e> {
     /// Callables, nested enum to make calling easier, allow private until Value is privates
     #[allow(private_interfaces)]
     Callable(Callable<'c>),
-    /// A function defined in the module
+    /// A function defined in the module (not a closure, doesn't capture any variables)
     #[allow(private_interfaces)]
     Function(&'e Function<'c>),
+    /// A closure: a function that captures variables from enclosing scopes.
+    ///
+    /// Contains a reference to the function definition and a vector of captured cell HeapIds.
+    /// When the closure is called, these cells are passed to the RunFrame for variable access.
+    /// When the closure is dropped, we must decrement the ref count on each captured cell.
+    #[allow(private_interfaces)]
+    Closure(&'e Function<'c>, Vec<HeapId>),
 
     // Heap-allocated values (stored in arena)
     Ref(HeapId),
@@ -89,7 +96,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for Value<'c, 'e> {
             Self::InternBytes(_) => "bytes",
             Self::Exc(e) => e.type_str(),
             Self::Callable(c) => c.py_type(heap),
-            Self::Function(_) => "function",
+            Self::Function(_) | Self::Closure(_, _) => "function",
             Self::Ref(id) => heap.get(*id).py_type(heap),
             #[cfg(feature = "dec-ref-check")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
@@ -199,7 +206,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for Value<'c, 'e> {
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
             Self::Callable(_) => true,
-            Self::Function(_) => true,
+            Self::Function(_) | Self::Closure(_, _) => true,
             Self::InternString(s) => !s.is_empty(),
             Self::InternBytes(b) => !b.is_empty(),
             Self::Ref(id) => heap.get(*id).py_bool(heap),
@@ -227,7 +234,7 @@ impl<'c, 'e> PyTrait<'c, 'e> for Value<'c, 'e> {
             Self::Range(size) => format!("0:{size}").into(),
             Self::Exc(exc) => format!("{exc}").into(),
             Self::Callable(c) => c.py_repr(heap),
-            Self::Function(f) => f.py_repr(),
+            Self::Function(f) | Self::Closure(f, _) => f.py_repr(),
             Self::InternString(s) => string_repr(s).into(),
             Self::InternBytes(b) => bytes_repr(b).into(),
             Self::Ref(id) => heap.get(*id).py_repr(heap),
@@ -438,7 +445,7 @@ impl<'c, 'e> Value<'c, 'e> {
                     singleton_id(SingletonSlot::False)
                 }
             }
-            Self::Function(f) => f.id(),
+            Self::Function(f) | Self::Closure(f, _) => f.id(),
             Self::InternString(s) => {
                 interned_id_from_parts(s.as_ptr() as usize, s.len(), INTERN_STR_ID_TAG, INTERN_STR_ID_MASK)
             }
@@ -510,7 +517,7 @@ impl<'c, 'e> Value<'c, 'e> {
                 std::mem::discriminant(c).hash(&mut hasher);
                 Some(hasher.finish())
             }
-            Self::Function(f) => {
+            Self::Function(f) | Self::Closure(f, _) => {
                 let mut hasher = DefaultHasher::new();
                 // TODO, this is NOT proper hashing, we should somehow hash the function properly
                 f.name.name.hash(&mut hasher);
@@ -576,6 +583,14 @@ impl<'c, 'e> Value<'c, 'e> {
                 heap.inc_ref(*id);
                 Self::Ref(*id)
             }
+            // Closures need to increment ref counts on captured cells
+            Self::Closure(f, cells) => {
+                // Increment ref count for each captured cell
+                for cell_id in cells {
+                    heap.inc_ref(*cell_id);
+                }
+                Self::Closure(f, cells.clone())
+            }
             // Immediate values can be copied without heap interaction
             other => other.clone_immediate(),
         }
@@ -585,7 +600,8 @@ impl<'c, 'e> Value<'c, 'e> {
     ///
     /// For immediate values, this is a no-op. For heap-allocated values (Ref variant),
     /// this decrements the reference count and frees the value (and any children) when
-    /// the count reaches zero.
+    /// the count reaches zero. For Closure variants, this decrements ref counts on all
+    /// captured cells.
     ///
     /// # Important
     /// This method MUST be called before overwriting a namespace slot or discarding
@@ -599,14 +615,30 @@ impl<'c, 'e> Value<'c, 'e> {
         #[cfg(feature = "dec-ref-check")]
         {
             let old = std::mem::replace(&mut self, Value::Dereferenced);
-            if let Self::Ref(id) = &old {
-                heap.dec_ref(*id);
-                std::mem::forget(old);
+            match &old {
+                Self::Ref(id) => {
+                    heap.dec_ref(*id);
+                    std::mem::forget(old);
+                }
+                Self::Closure(_, cells) => {
+                    // Decrement ref count for each captured cell
+                    for cell_id in cells {
+                        heap.dec_ref(*cell_id);
+                    }
+                    std::mem::forget(old);
+                }
+                _ => {}
             }
         }
         #[cfg(not(feature = "dec-ref-check"))]
-        if let Self::Ref(id) = self {
-            heap.dec_ref(id);
+        match self {
+            Self::Ref(id) => heap.dec_ref(id),
+            Self::Closure(_, cells) => {
+                for cell_id in cells {
+                    heap.dec_ref(cell_id);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -626,6 +658,9 @@ impl<'c, 'e> Value<'c, 'e> {
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Callable(c) => Self::Callable(c.clone()),
             Self::Function(f) => Self::Function(f),
+            // Closures contain captured cell HeapIds - these should NOT be cloned without
+            // incrementing ref counts on the cells, so we panic here like Ref
+            Self::Closure(_, _) => panic!("Closure clones must go through clone_with_heap to maintain cell refcounts"),
             Self::InternString(s) => Self::InternString(s),
             Self::InternBytes(b) => Self::InternBytes(b),
             Self::Ref(_) => panic!("Ref clones must go through clone_with_heap to maintain refcounts"),
@@ -639,6 +674,9 @@ impl<'c, 'e> Value<'c, 'e> {
     /// IMPORTANT: For Ref variants, this copies the ValueId but does NOT increment
     /// the reference count. The caller MUST call `heap.inc_ref()` separately for any
     /// Ref variants to maintain correct reference counting.
+    ///
+    /// For Closure variants, this copies without incrementing cell ref counts.
+    /// The caller MUST increment ref counts on the captured cells separately.
     ///
     /// This is useful when you need to copy Objects from a borrowed heap context
     /// and will increment refcounts in a separate step.
@@ -654,6 +692,8 @@ impl<'c, 'e> Value<'c, 'e> {
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Callable(c) => Self::Callable(c.clone()),
             Self::Function(f) => Self::Function(f),
+            // Caller must increment refcount on each captured cell!
+            Self::Closure(f, cells) => Self::Closure(f, cells.clone()),
             Self::InternString(s) => Self::InternString(s),
             Self::InternBytes(b) => Self::InternBytes(b),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
