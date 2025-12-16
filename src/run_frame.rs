@@ -1,5 +1,5 @@
 use crate::args::ArgValues;
-use crate::evaluate::EvaluateExpr;
+use crate::evaluate::{EvalResult, EvaluateExpr};
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
 };
@@ -45,6 +45,20 @@ pub struct RunFrame<'i, P: AbstractPositionTracker> {
     interns: &'i Interns,
     /// reference to position tracker
     position_tracker: &'i mut P,
+}
+
+/// Extracts a value from `EvalResult`, returning early with `FrameExit::ExternalCall` if
+/// an external call is pending.
+///
+/// Similar to `return_ext_call!` from evaluate.rs, but returns `Ok(Some(FrameExit::ExternalCall(...)))`
+/// which is the appropriate return type for `execute_node` and related methods.
+macro_rules! frame_ext_call {
+    ($expr:expr) => {
+        match $expr {
+            EvalResult::Value(value) => value,
+            EvalResult::ExternalCall(ext_call) => return Ok(Some(FrameExit::ExternalCall(ext_call))),
+        }
+    };
 }
 
 impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
@@ -109,15 +123,22 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         let start_index = position.index;
         let mut clause_state = position.clause_state;
 
-        // Normal execution from start_index
+        // execute from start_index
         for (i, node) in nodes.iter().enumerate().skip(start_index) {
-            if let Some(exit) = self.execute_node(namespaces, heap, node, clause_state)? {
+            // External calls are returned as Ok(Some(FrameExit::ExternalCall(...))) from execute_node
+            let exit_frame = self.execute_node(namespaces, heap, node, clause_state)?;
+            if let Some(exit) = exit_frame {
                 // Set the index of the node to execute on resume
                 // we will have called set_skip() already if we need to skip the current node
                 self.position_tracker.record(i);
                 return Ok(Some(exit));
             }
             clause_state = None;
+
+            // if enabled, clear return values after executing each node
+            if P::clear_return_values() {
+                namespaces.clear_return_values(heap);
+            }
         }
         Ok(None)
     }
@@ -150,29 +171,46 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
 
         match node {
             Node::Expr(expr) => {
-                if let Err(mut e) =
-                    EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns).evaluate_discard(expr)
-                {
-                    set_name(self.name, &mut e);
-                    return Err(e);
+                match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns).evaluate_discard(expr) {
+                    Ok(EvalResult::Value(())) => {}
+                    Ok(EvalResult::ExternalCall(ext_call)) => return Ok(Some(FrameExit::ExternalCall(ext_call))),
+                    Err(mut e) => {
+                        set_name(self.name, &mut e);
+                        return Err(e);
+                    }
                 }
             }
-            Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(namespaces, heap, expr)?))),
-            Node::ReturnNone => return Ok(Some(FrameExit::Return(Value::None))),
-            Node::Yield(expr) => {
-                let value = match expr {
-                    Some(e) => self.execute_expr(namespaces, heap, e)?,
-                    None => Value::None,
-                };
-                self.position_tracker.set_skip();
-                return Ok(Some(FrameExit::Yield(value)));
+            Node::Return(expr) => {
+                return self.execute_expr(namespaces, heap, expr).map(|result| match result {
+                    EvalResult::Value(value) => Some(FrameExit::Return(value)),
+                    EvalResult::ExternalCall(ext_call) => Some(FrameExit::ExternalCall(ext_call)),
+                })
             }
-            Node::Raise(exc) => self.raise(namespaces, heap, exc.as_ref())?,
-            Node::Assert { test, msg } => self.assert_(namespaces, heap, test, msg.as_ref())?,
-            Node::Assign { target, object } => self.assign(namespaces, heap, target, object)?,
-            Node::OpAssign { target, op, object } => self.op_assign(namespaces, heap, target, op, object)?,
+            Node::ReturnNone => return Ok(Some(FrameExit::Return(Value::None))),
+            Node::Raise(exc) => {
+                if let Some(exit) = self.raise(namespaces, heap, exc.as_ref())? {
+                    return Ok(Some(exit));
+                }
+            }
+            Node::Assert { test, msg } => {
+                if let Some(exit) = self.assert_(namespaces, heap, test, msg.as_ref())? {
+                    return Ok(Some(exit));
+                }
+            }
+            Node::Assign { target, object } => {
+                if let Some(exit) = self.assign(namespaces, heap, target, object)? {
+                    return Ok(Some(exit));
+                }
+            }
+            Node::OpAssign { target, op, object } => {
+                if let Some(exit) = self.op_assign(namespaces, heap, target, op, object)? {
+                    return Ok(Some(exit));
+                }
+            }
             Node::SubscriptAssign { target, index, value } => {
-                self.subscript_assign(namespaces, heap, target, index, value)?;
+                if let Some(exit) = self.subscript_assign(namespaces, heap, target, index, value)? {
+                    return Ok(Some(exit));
+                }
             }
             Node::For {
                 target,
@@ -202,12 +240,13 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         Ok(None)
     }
 
+    /// Evaluates an expression and returns a Value.
     fn execute_expr<T: ResourceTracker>(
         &self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         expr: &ExprLoc,
-    ) -> RunResult<Value> {
+    ) -> RunResult<EvalResult<Value>> {
         match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns).evaluate_use(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
@@ -222,7 +261,7 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         expr: &ExprLoc,
-    ) -> RunResult<bool> {
+    ) -> RunResult<EvalResult<bool>> {
         match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns).evaluate_bool(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
@@ -243,9 +282,9 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         op_exc_expr: Option<&ExprLoc>,
-    ) -> RunResult<()> {
+    ) -> RunResult<Option<FrameExit>> {
         if let Some(exc_expr) = op_exc_expr {
-            let value = self.execute_expr(namespaces, heap, exc_expr)?;
+            let value = frame_ext_call!(self.execute_expr(namespaces, heap, exc_expr)?);
             match &value {
                 Value::Exc(_) => {
                     // Match on the reference then use into_exc() due to issues with destructuring Value
@@ -281,14 +320,12 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         heap: &mut Heap<T>,
         test: &ExprLoc,
         msg: Option<&ExprLoc>,
-    ) -> RunResult<()> {
-        if !self.execute_expr_bool(namespaces, heap, test)? {
+    ) -> RunResult<Option<FrameExit>> {
+        let ok = frame_ext_call!(self.execute_expr_bool(namespaces, heap, test)?);
+        if !ok {
             let msg = if let Some(msg_expr) = msg {
-                Some(
-                    self.execute_expr(namespaces, heap, msg_expr)?
-                        .py_str(heap, self.interns)
-                        .to_string(),
-                )
+                let msg_value = frame_ext_call!(self.execute_expr(namespaces, heap, msg_expr)?);
+                Some(msg_value.py_str(heap, self.interns).to_string())
             } else {
                 None
             };
@@ -296,7 +333,7 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
                 .with_frame(self.stack_frame(test.position))
                 .into());
         }
-        Ok(())
+        Ok(None)
     }
 
     fn assign<T: ResourceTracker>(
@@ -305,8 +342,8 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         heap: &mut Heap<T>,
         target: &Identifier,
         expr: &ExprLoc,
-    ) -> RunResult<()> {
-        let new_value = self.execute_expr(namespaces, heap, expr)?;
+    ) -> RunResult<Option<FrameExit>> {
+        let new_value = frame_ext_call!(self.execute_expr(namespaces, heap, expr)?);
 
         // Determine which namespace to use
         let ns_idx = match target.scope {
@@ -327,7 +364,7 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
             let old_value = std::mem::replace(namespace.get_mut(target.namespace_id()), new_value);
             old_value.drop_with_heap(heap);
         }
-        Ok(())
+        Ok(None)
     }
 
     fn op_assign<T: ResourceTracker>(
@@ -337,8 +374,8 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         target: &Identifier,
         op: &Operator,
         expr: &ExprLoc,
-    ) -> RunResult<()> {
-        let rhs = self.execute_expr(namespaces, heap, expr)?;
+    ) -> RunResult<Option<FrameExit>> {
+        let rhs = frame_ext_call!(self.execute_expr(namespaces, heap, expr)?);
         // Capture rhs type before it's consumed
         let rhs_type = rhs.py_type(Some(heap));
 
@@ -500,7 +537,7 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
             let e = SimpleException::augmented_assign_type_error(op, target_type, rhs_type);
             Err(e.with_frame(self.stack_frame(expr.position)).into())
         } else {
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -511,13 +548,14 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         target: &Identifier,
         index: &ExprLoc,
         value: &ExprLoc,
-    ) -> RunResult<()> {
-        let key = self.execute_expr(namespaces, heap, index)?;
-        let val = self.execute_expr(namespaces, heap, value)?;
+    ) -> RunResult<Option<FrameExit>> {
+        let key = frame_ext_call!(self.execute_expr(namespaces, heap, index)?);
+        let val = frame_ext_call!(self.execute_expr(namespaces, heap, value)?);
         let target_val = namespaces.get_var_mut(self.local_idx, target, self.interns)?;
         if let Value::Ref(id) = target_val {
             let id = *id;
-            heap.with_entry_mut(id, |heap, data| data.py_setitem(key, val, heap, self.interns))
+            heap.with_entry_mut(id, |heap, data| data.py_setitem(key, val, heap, self.interns))?;
+            Ok(None)
         } else {
             let e = exc_fmt!(ExcType::TypeError; "'{}' object does not support item assignment", target_val.py_type(Some(heap)));
             Err(e.with_frame(self.stack_frame(index.position)).into())
@@ -546,7 +584,8 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         _or_else: &[Node],
         start_index: usize,
     ) -> RunResult<Option<FrameExit>> {
-        let Value::Range(range_size) = self.execute_expr(namespaces, heap, iter)? else {
+        let iter_value = frame_ext_call!(self.execute_expr(namespaces, heap, iter)?);
+        let Value::Range(range_size) = iter_value else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
         };
 
@@ -574,7 +613,7 @@ impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
         body: &[Node],
         or_else: &[Node],
     ) -> RunResult<Option<FrameExit>> {
-        if self.execute_expr_bool(namespaces, heap, test)? {
+        if frame_ext_call!(self.execute_expr_bool(namespaces, heap, test)?) {
             if let Some(frame_exit) = self.execute(namespaces, heap, body)? {
                 self.position_tracker.set_clause_state(ClauseState::If(true));
                 return Ok(Some(frame_exit));

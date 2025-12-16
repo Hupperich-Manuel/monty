@@ -18,8 +18,9 @@ fn main() -> ExitCode {
     };
     let input_names = vec![];
     let inputs = vec![];
+    let ext_functions = vec![];
 
-    let ex = match ExecutorIter::new(&code, file_path, &input_names) {
+    let ex = match ExecutorIter::new(&code, file_path, &input_names, ext_functions) {
         Ok(ex) => ex,
         Err(err) => {
             eprintln!("error: {err}");
@@ -28,24 +29,25 @@ fn main() -> ExitCode {
     };
 
     let start = Instant::now();
-    let mut progress_result = ex.run_no_limits(inputs);
-    loop {
-        match progress_result {
-            Ok(ExecProgress::Complete(value)) => {
-                let elapsed = start.elapsed();
-                eprintln!("{elapsed:?}, output: {value}");
-                return ExitCode::SUCCESS;
-            }
-            Ok(ExecProgress::Yield { value, state }) => {
-                let elapsed = start.elapsed();
-                eprintln!("{elapsed:?}, yield: {value}");
-                progress_result = state.run();
-            }
-            Err(err) => {
-                let elapsed = start.elapsed();
-                eprintln!("{elapsed:?}, error: {err}");
-                return ExitCode::FAILURE;
-            }
+    match ex.run_no_limits(inputs) {
+        Ok(ExecProgress::Complete(value)) => {
+            let elapsed = start.elapsed();
+            eprintln!("{elapsed:?}, output: {value}");
+            ExitCode::SUCCESS
+        }
+        Ok(ExecProgress::FunctionCall {
+            function_name, args, ..
+        }) => {
+            let elapsed = start.elapsed();
+            eprintln!(
+                "{elapsed:?}, external function call: {function_name}({args:?}) - no host to provide return value"
+            );
+            ExitCode::FAILURE
+        }
+        Err(err) => {
+            let elapsed = start.elapsed();
+            eprintln!("{elapsed:?}, error: {err}");
+            ExitCode::FAILURE
         }
     }
 }

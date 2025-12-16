@@ -1,6 +1,7 @@
 use crate::{
     args::ArgValues,
     builtins::Builtins,
+    evaluate::{EvalResult, ExternalCall},
     exceptions::{exc_fmt, ExcType},
     expressions::Identifier,
     heap::{Heap, HeapData},
@@ -43,16 +44,29 @@ impl Callable {
         heap: &mut Heap<T>,
         args: ArgValues,
         interns: &Interns,
-    ) -> RunResult<Value> {
+    ) -> RunResult<EvalResult<Value>> {
         match self {
-            Callable::Builtin(b) => b.call(heap, args, interns),
+            Callable::Builtin(b) => b.call(heap, args, interns).map(EvalResult::Value),
             Callable::Name(ident) => {
                 // Look up the callable in the namespace
                 let value = namespaces.get_var(local_idx, ident, interns)?;
 
                 match value {
-                    Value::Builtin(builtin) => return builtin.call(heap, args, interns),
-                    Value::Function(f_id) => return interns.get_function(*f_id).call(namespaces, heap, args, interns),
+                    Value::Builtin(builtin) => return builtin.call(heap, args, interns).map(EvalResult::Value),
+                    Value::Function(f_id) => {
+                        return interns
+                            .get_function(*f_id)
+                            .call(namespaces, heap, args, interns)
+                            .map(EvalResult::Value)
+                    }
+                    Value::ExtFunction(f_id) => {
+                        let f_id = *f_id;
+                        return if let Some(return_value) = namespaces.take_return_value(heap) {
+                            Ok(EvalResult::Value(return_value))
+                        } else {
+                            Ok(EvalResult::ExternalCall(ExternalCall::new(f_id, args)))
+                        };
+                    }
                     // Check for heap-allocated closure
                     Value::Ref(heap_id) => {
                         let heap_data = heap.get(*heap_id);
@@ -61,7 +75,9 @@ impl Callable {
                             // Clone the cells to release the borrow on heap_data before calling
                             // call_with_cells will inc_ref when injecting into the new namespace
                             let cells = cells.clone();
-                            return f.call_with_cells(namespaces, heap, args, &cells, interns);
+                            return f
+                                .call_with_cells(namespaces, heap, args, &cells, interns)
+                                .map(EvalResult::Value);
                         }
                     }
                     _ => {}
@@ -87,7 +103,7 @@ impl Callable {
     pub fn py_type(&self) -> &'static str {
         match self {
             Self::Builtin(b) => b.py_type(),
-            Self::Name(_) => "TODO",
+            Self::Name(_) => "function",
         }
     }
 }

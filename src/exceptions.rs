@@ -54,18 +54,31 @@ impl ExcType {
     ) -> RunResult<Value> {
         match args {
             ArgValues::Zero => Ok(Value::Exc(SimpleException::new(self, None))),
-            ArgValues::One(Value::InternString(string_id)) => Ok(Value::Exc(SimpleException::new(
-                self,
-                Some(interns.get_str(string_id).to_owned()),
-            ))),
-            ArgValues::One(Value::Ref(heap_id)) => {
-                if let HeapData::Str(s) = heap.get(heap_id) {
-                    Ok(Value::Exc(SimpleException::new(self, Some(s.as_str().to_owned()))))
-                } else {
-                    internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
-                }
+            ArgValues::One(value) => {
+                // Borrow the value to inspect its type, then clean up with drop_with_heap
+                let result = match &value {
+                    Value::InternString(string_id) => Ok(Value::Exc(SimpleException::new(
+                        self,
+                        Some(interns.get_str(*string_id).to_owned()),
+                    ))),
+                    Value::Ref(heap_id) => {
+                        if let HeapData::Str(s) = heap.get(*heap_id) {
+                            Ok(Value::Exc(SimpleException::new(self, Some(s.as_str().to_owned()))))
+                        } else {
+                            internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
+                        }
+                    }
+                    _ => {
+                        internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
+                    }
+                };
+                // Properly clean up the value using drop_with_heap which handles dec-ref-check
+                value.drop_with_heap(heap);
+                result
             }
             _ => {
+                // Clean up any args before returning error
+                args.drop_with_heap(heap);
                 internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
             }
         }
@@ -528,7 +541,7 @@ impl ExceptionRaise {
     #[must_use]
     pub fn summary(&self) -> String {
         if let Some(ref frame) = self.frame {
-            format!("({}) {}", frame.position, self.exc)
+            format!("({:?}) {}", frame.position, self.exc)
         } else {
             format!("(<no-tb>) {}", self.exc)
         }
@@ -634,7 +647,7 @@ impl fmt::Display for InternalRunError {
 ///
 /// Can be an internal error (bug in interpreter), a Python exception,
 /// or a resource limit error.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum RunError {
     Internal(InternalRunError),
     Exc(ExceptionRaise),

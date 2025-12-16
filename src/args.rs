@@ -1,9 +1,11 @@
 use crate::{
     exceptions::ExcType,
     expressions::{ExprLoc, Identifier},
+    heap::Heap,
+    intern::Interns,
     run_frame::RunResult,
     value::Value,
-    ParseError,
+    ParseError, PyObject, ResourceTracker,
 };
 
 /// Type for method call arguments.
@@ -66,9 +68,21 @@ impl ArgValues {
                 namespace.push(a1);
                 namespace.push(a2);
             }
-            Self::Many(v) => {
-                namespace.extend(v);
+            Self::Many(args) => {
+                namespace.extend(args);
             }
+        }
+    }
+
+    /// Converts the arguments into a Vec of PyObjects.
+    ///
+    /// This is used when passing arguments to external functions.
+    pub fn into_py_objects<T: ResourceTracker>(self, heap: &mut Heap<T>, interns: &Interns) -> Vec<PyObject> {
+        match self {
+            Self::Zero => vec![],
+            Self::One(a) => vec![PyObject::new(a, heap, interns)],
+            Self::Two(a1, a2) => vec![PyObject::new(a1, heap, interns), PyObject::new(a2, heap, interns)],
+            Self::Many(args) => args.into_iter().map(|v| PyObject::new(v, heap, interns)).collect(),
         }
     }
 
@@ -78,7 +92,27 @@ impl ArgValues {
             Self::Zero => 0,
             Self::One(_) => 1,
             Self::Two(_, _) => 2,
-            Self::Many(v) => v.len(),
+            Self::Many(args) => args.len(),
+        }
+    }
+
+    /// Properly drops all values in the arguments, decrementing reference counts.
+    ///
+    /// This must be called when discarding `ArgValues` that may contain `Value::Ref`
+    /// variants to maintain correct reference counts on the heap.
+    pub fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+        match self {
+            Self::Zero => {}
+            Self::One(v) => v.drop_with_heap(heap),
+            Self::Two(v1, v2) => {
+                v1.drop_with_heap(heap);
+                v2.drop_with_heap(heap);
+            }
+            Self::Many(args) => {
+                for v in args {
+                    v.drop_with_heap(heap);
+                }
+            }
         }
     }
 }

@@ -275,8 +275,7 @@ fn input_exception_raise() {
     }]);
     match result.unwrap_err() {
         RunError::Exc(exc) => assert_eq!(exc.exc.to_string(), "ValueError('input error')"),
-        RunError::Internal(internal) => panic!("expected exception not internal error: {internal}"),
-        RunError::Resource(res) => panic!("expected exception not resource error: {res}"),
+        err => panic!("expected exception not: {err:?}"),
     }
 }
 

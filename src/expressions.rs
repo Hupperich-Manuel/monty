@@ -216,11 +216,6 @@ pub enum Node {
     Expr(ExprLoc),
     Return(ExprLoc),
     ReturnNone,
-    /// Yield statement with optional value expression.
-    ///
-    /// At module level, this pauses execution and returns control to the caller.
-    /// The yielded value (or None if no expression) is returned via `FrameExit::Yield`.
-    Yield(Option<ExprLoc>),
     Raise(Option<ExprLoc>),
     Assert {
         test: ExprLoc,

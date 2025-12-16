@@ -1,18 +1,20 @@
 use ahash::AHashMap;
-use monty::{Executor, RunError};
+use monty::{ExecProgress, Executor, ExecutorIter, ParseError, PyObject, RunError};
 use pyo3::prelude::*;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-/// Specifies which interpreters a test should skip.
+/// Specifies which interpreters a test should skip and the execution mode.
 ///
-/// Parsed from an optional `# skip=monty,cpython` comment at the start of a test file.
-/// If not present, defaults to running on both interpreters (both fields false).
+/// Parsed from an optional first-line comment like `# skip=monty,cpython` or `# mode: iter`.
+/// If not present, defaults to running on both interpreters in standard mode.
 #[derive(Debug, Clone, Default)]
 struct TestSkips {
     monty: bool,
     cpython: bool,
+    /// When true, use ExecutorIter with external function support instead of Executor.
+    iter_mode: bool,
 }
 
 /// Represents the expected outcome of a test fixture
@@ -69,17 +71,35 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestSkips) {
 
     assert!(!lines.is_empty(), "Empty fixture file");
 
-    // Check for skip comment at the start of the file
+    // Check for directives at the start of the file
+    // Supports: # skip=monty,cpython and # mode: iter (can be combined on same line)
     let (skips, code_start_idx) = if let Some(first_line) = lines.first() {
-        if let Some(skip_str) = first_line.strip_prefix("# skip=") {
-            let skips = TestSkips {
-                monty: skip_str.contains("monty"),
-                cpython: skip_str.contains("cpython"),
-            };
-            (skips, 1)
-        } else {
-            (TestSkips::default(), 0)
+        let mut skips = TestSkips::default();
+        let mut has_directive = false;
+
+        // Check for mode: iter directive
+        if first_line.contains("mode: iter") {
+            skips.iter_mode = true;
+            // iter mode implicitly skips cpython (no external functions there)
+            skips.cpython = true;
+            has_directive = true;
         }
+
+        // Check for skip= directive
+        if let Some(skip_idx) = first_line.find("skip=") {
+            let skip_str = &first_line[skip_idx + 5..];
+            // Parse until whitespace or end of line
+            let skip_end = skip_str.find(|c: char| c.is_whitespace()).unwrap_or(skip_str.len());
+            let skip_str = &skip_str[..skip_end];
+            skips.monty = skip_str.contains("monty");
+            if skip_str.contains("cpython") {
+                skips.cpython = true;
+            }
+            has_directive = true;
+        }
+
+        let code_start = usize::from(has_directive && first_line.starts_with('#'));
+        (skips, code_start)
     } else {
         (TestSkips::default(), 0)
     };
@@ -167,6 +187,41 @@ fn parse_ref_counts(s: &str) -> AHashMap<String, usize> {
     counts
 }
 
+/// External function names available in iter mode tests.
+///
+/// These functions are provided by the test runner when a test uses `# mode: iter`.
+const ITER_EXT_FUNCTIONS: &[&str] = &[
+    "add_ints",       // (a, b) -> a + b (integers)
+    "concat_strings", // (a, b) -> a + b (strings)
+    "return_value",   // (x) -> x (identity)
+];
+
+/// Dispatches an external function call to the appropriate test implementation.
+///
+/// # Panics
+/// Panics if the function name is unknown or arguments are invalid types.
+fn dispatch_external_call(name: &str, args: Vec<PyObject>) -> PyObject {
+    match name {
+        "add_ints" => {
+            assert!(args.len() == 2, "add_ints requires 2 arguments");
+            let a = i64::try_from(&args[0]).expect("add_ints: first arg must be int");
+            let b = i64::try_from(&args[1]).expect("add_ints: second arg must be int");
+            PyObject::Int(a + b)
+        }
+        "concat_strings" => {
+            assert!(args.len() == 2, "concat_strings requires 2 arguments");
+            let a = String::try_from(&args[0]).expect("concat_strings: first arg must be str");
+            let b = String::try_from(&args[1]).expect("concat_strings: second arg must be str");
+            PyObject::String(a + &b)
+        }
+        "return_value" => {
+            assert!(args.len() == 1, "return_value requires 1 argument");
+            args.into_iter().next().unwrap()
+        }
+        _ => panic!("Unknown external function: {name}"),
+    }
+}
+
 /// Run a test with the given code and expectation
 ///
 /// This function executes Python code via the Executor and validates the result
@@ -181,15 +236,20 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
             Ok(ex) => {
                 let result = ex.run_ref_counts(vec![]);
                 match result {
-                    Ok((_, (actual, unique_refs, heap_count))) => {
+                    Ok(monty::RefCountOutput {
+                        counts,
+                        unique_refs,
+                        heap_count,
+                        ..
+                    }) => {
                         // Strict matching: verify all heap objects are accounted for by variables
                         assert_eq!(
                             unique_refs, heap_count,
                             "[{test_name}] Strict matching failed: {heap_count} heap objects exist, \
                              but only {unique_refs} are referenced by variables.\n\
-                             Actual ref counts: {actual:?}"
+                             Actual ref counts: {counts:?}"
                         );
-                        assert_eq!(&actual, expected, "[{test_name}] ref-counts mismatch");
+                        assert_eq!(&counts, expected, "[{test_name}] ref-counts mismatch");
                     }
                     Err(e) => panic!("[{test_name}] Runtime error:\n{e}"),
                 }
@@ -246,14 +306,108 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
             if let Expectation::ParseError(expected) = expectation {
                 // Format the parse error for comparison with test expectations
                 let err_msg = match &parse_err {
-                    monty::ParseError::PreEvalExc(exc) => format!("Exc: {}", exc.summary()),
-                    monty::ParseError::Internal(s) => format!("Internal: {s}"),
-                    monty::ParseError::PreEvalInternal(s) => format!("Eval Internal: {s}"),
-                    monty::ParseError::PreEvalResource(s) => format!("Resource: {s}"),
+                    ParseError::PreEvalExc(exc) => format!("Exc: {}", exc.summary()),
+                    ParseError::Internal(s) => format!("Internal: {s}"),
+                    ParseError::PreEvalInternal(s) => format!("Eval Internal: {s}"),
+                    ParseError::PreEvalResource(s) => format!("Resource: {s}"),
                 };
                 assert_eq!(err_msg, expected, "[{test_name}] Parse error mismatch");
             } else {
                 panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+            }
+        }
+    }
+}
+
+/// Run a test using ExecutorIter with external function support.
+///
+/// This function handles tests marked with `# mode: iter` directive by using the
+/// iterative executor API and providing implementations for predefined external functions.
+fn run_iter_test(path: &Path, code: &str, expectation: Expectation) {
+    let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    // Ref-counting tests not supported in iter mode
+    #[cfg(feature = "ref-counting")]
+    if matches!(expectation, Expectation::RefCounts(_)) {
+        panic!("[{test_name}] ref-counts tests are not supported in iter mode");
+    }
+
+    let ext_functions: Vec<String> = ITER_EXT_FUNCTIONS.iter().copied().map(str::to_string).collect();
+
+    let exec = match ExecutorIter::new(code, "test.py", &[], ext_functions) {
+        Ok(e) => e,
+        Err(parse_err) => {
+            if let Expectation::ParseError(expected) = expectation {
+                let err_msg = match &parse_err {
+                    ParseError::PreEvalExc(exc) => format!("Exc: {}", exc.summary()),
+                    ParseError::Internal(s) => format!("Internal: {s}"),
+                    ParseError::PreEvalInternal(s) => format!("Eval Internal: {s}"),
+                    ParseError::PreEvalResource(s) => format!("Resource: {s}"),
+                };
+                assert_eq!(err_msg, expected, "[{test_name}] Parse error mismatch");
+                return;
+            }
+            panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+        }
+    };
+
+    // Run execution loop, handling external function calls until complete
+    let result = run_iter_loop(exec);
+
+    // Validate result against expectation
+    match result {
+        Ok(obj) => match expectation {
+            Expectation::ReturnStr(expected) => {
+                let output = obj.to_string();
+                assert_eq!(output, expected, "[{test_name}] str() mismatch");
+            }
+            Expectation::Return(expected) => {
+                let output = obj.py_repr();
+                assert_eq!(output, expected, "[{test_name}] py_repr() mismatch");
+            }
+            Expectation::ReturnType(expected) => {
+                let output = obj.type_name();
+                assert_eq!(output, expected, "[{test_name}] type_name() mismatch");
+            }
+            #[cfg(not(feature = "ref-counting"))]
+            Expectation::RefCounts(_) => {}
+            Expectation::NoException => {}
+            Expectation::Raise(_) => {
+                panic!("[{test_name}] Expected exception but code completed normally");
+            }
+            Expectation::ParseError(_) => unreachable!(),
+            #[cfg(feature = "ref-counting")]
+            Expectation::RefCounts(_) => unreachable!(),
+        },
+        Err(e) => {
+            if let Expectation::Raise(expected) = expectation {
+                let output = match &e {
+                    RunError::Exc(exc) => exc.exc.to_string(),
+                    RunError::Internal(internal) => internal.to_string(),
+                    RunError::Resource(res) => res.to_string(),
+                };
+                assert_eq!(output, expected, "[{test_name}] Exception mismatch");
+            } else {
+                panic!("[{test_name}] Unexpected error:\n{e}");
+            }
+        }
+    }
+}
+
+/// Execute the iter loop, dispatching external function calls until complete.
+fn run_iter_loop(exec: ExecutorIter) -> Result<PyObject, RunError> {
+    let mut progress = exec.run_no_limits(vec![])?;
+
+    loop {
+        match progress {
+            ExecProgress::Complete(result) => return Ok(result),
+            ExecProgress::FunctionCall {
+                function_name,
+                args,
+                state,
+            } => {
+                let return_value = dispatch_external_call(&function_name, args);
+                progress = state.run(return_value)?;
             }
         }
     }
@@ -408,7 +562,11 @@ fn run_test_cases_monty(path: &Path) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
     let (code, expectation, skips) = parse_fixture(&content);
     if !skips.monty {
-        run_test(path, &code, expectation);
+        if skips.iter_mode {
+            run_iter_test(path, &code, expectation);
+        } else {
+            run_test(path, &code, expectation);
+        }
     }
     Ok(())
 }

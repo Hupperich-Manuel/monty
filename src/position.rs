@@ -1,27 +1,22 @@
-use crate::value::Value;
+use crate::{evaluate::ExternalCall, value::Value};
 use std::fmt::Debug;
 
-/// Result of executing a frame - either a return value or a yield.
+/// Result of executing a frame - return, yield, or external function call.
 ///
 /// When a frame encounters a `return` statement, it produces `Return(value)`.
 /// When a frame encounters a `yield` statement, it produces `Yield(value)` to
 /// pause execution and return control to the caller.
+/// When a frame encounters a call to an external function, it produces
+/// `FunctionCall` to pause execution and let the host provide the return value.
 #[derive(Debug)]
 pub enum FrameExit {
     /// Normal return from a function or end of module execution.
     Return(Value),
-    /// Yield pauses execution and returns the yielded value.
+    /// External function call pauses execution.
     ///
-    /// The caller may resume execution from after the yield point.
-    Yield(Value),
-}
-
-impl From<FrameExit> for Value {
-    fn from(exit: FrameExit) -> Self {
-        match exit {
-            FrameExit::Return(value) | FrameExit::Yield(value) => value,
-        }
-    }
+    /// The host must provide the return value to resume execution. The arguments
+    /// have already been evaluated and converted to `Value`.
+    ExternalCall(ExternalCall),
 }
 
 pub trait AbstractPositionTracker: Clone + Debug {
@@ -31,11 +26,11 @@ pub trait AbstractPositionTracker: Clone + Debug {
     /// When suspending execution, set the position to resume from
     fn record(&mut self, index: usize);
 
-    /// Mark that we've reached a suspend point, in this frame restart from index + 1
-    fn set_skip(&mut self);
-
     /// When leaving an if statement or for loop, set the position to resume from
     fn set_clause_state(&mut self, clause_state: ClauseState);
+
+    /// Whether to clear return values, this is only necessary when position is being tracked
+    fn clear_return_values() -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -48,9 +43,11 @@ impl AbstractPositionTracker for NoPositionTracker {
 
     fn record(&mut self, _index: usize) {}
 
-    fn set_skip(&mut self) {}
-
     fn set_clause_state(&mut self, _clause_state: ClauseState) {}
+
+    fn clear_return_values() -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,12 +84,12 @@ impl AbstractPositionTracker for PositionTracker {
         });
     }
 
-    fn set_skip(&mut self) {
-        self.incr = true;
-    }
-
     fn set_clause_state(&mut self, clause_state: ClauseState) {
         self.clause_state = Some(clause_state);
+    }
+
+    fn clear_return_values() -> bool {
+        true
     }
 }
 

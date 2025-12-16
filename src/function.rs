@@ -153,17 +153,7 @@ impl Function {
         // Clean up the function's namespace (properly decrementing ref counts)
         namespaces.pop_with_heap(heap);
 
-        match result {
-            Ok(Some(FrameExit::Return(obj))) => Ok(obj),
-            Ok(Some(FrameExit::Yield(_))) => {
-                // Yield inside a function would create a generator - not yet supported
-                Err(RunError::Exc(
-                    ExcType::not_implemented("yield inside functions (generators)").into(),
-                ))
-            }
-            Ok(None) => Ok(Value::None),
-            Err(e) => Err(e),
-        }
+        map_result(result)
     }
 
     /// Calls this function as a closure with captured cells.
@@ -226,17 +216,7 @@ impl Function {
         // Clean up the function's namespace (properly decrementing ref counts)
         namespaces.pop_with_heap(heap);
 
-        match result {
-            Ok(Some(FrameExit::Return(obj))) => Ok(obj),
-            Ok(Some(FrameExit::Yield(_))) => {
-                // Yield inside a function would create a generator - not yet supported
-                Err(RunError::Exc(
-                    ExcType::not_implemented("yield inside functions (generators)").into(),
-                ))
-            }
-            Ok(None) => Ok(Value::None),
-            Err(e) => Err(e),
-        }
+        map_result(result)
     }
 
     /// Writes the Python repr() string for this function to a formatter.
@@ -298,5 +278,18 @@ impl Function {
         Err(SimpleException::new(ExcType::TypeError, Some(msg))
             .with_position(self.name.position)
             .into())
+    }
+}
+
+fn map_result(result: RunResult<Option<FrameExit>>) -> RunResult<Value> {
+    match result? {
+        Some(FrameExit::Return(obj)) => Ok(obj),
+        Some(FrameExit::ExternalCall { .. }) => {
+            // External function calls inside user-defined functions not yet supported
+            Err(RunError::Exc(
+                ExcType::not_implemented("external function calls inside user-defined functions").into(),
+            ))
+        }
+        None => Ok(Value::None),
     }
 }

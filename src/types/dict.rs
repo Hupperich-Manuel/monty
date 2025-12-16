@@ -10,7 +10,7 @@ use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
-use crate::types::{List, PyTrait};
+use crate::types::{List, PyTrait, Tuple};
 use crate::value::{Attr, Value};
 
 /// Python dict type, wrapping an IndexMap to preserve insertion order.
@@ -450,7 +450,7 @@ impl PyTrait for Dict {
                 let items = self.items(heap);
                 let mut tuples: Vec<Value> = Vec::with_capacity(items.len());
                 for (k, v) in items {
-                    let tuple_id = heap.allocate(HeapData::Tuple(vec![k, v].into()))?;
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![k, v])))?;
                     tuples.push(Value::Ref(tuple_id));
                 }
                 let list_id = heap.allocate(HeapData::List(List::new(tuples)))?;

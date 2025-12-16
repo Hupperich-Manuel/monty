@@ -14,7 +14,7 @@ use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
 
 use crate::heap::HeapData;
 use crate::heap::{Heap, HeapId};
-use crate::intern::{BytesId, FunctionId, Interns, StringId};
+use crate::intern::{BytesId, ExtFunctionId, FunctionId, Interns, StringId};
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
 use crate::types::bytes::bytes_repr_fmt;
@@ -52,6 +52,8 @@ pub enum Value {
     Builtin(Builtins),
     /// A function defined in the module (not a closure, doesn't capture any variables)
     Function(FunctionId),
+    /// Reference to an external function defined on the host
+    ExtFunction(ExtFunctionId),
 
     // Heap-allocated values (stored in arena)
     Ref(HeapId),
@@ -96,7 +98,7 @@ impl PyTrait for Value {
             Self::InternBytes(_) => "bytes",
             Self::Exc(e) => e.type_str(),
             Self::Builtin(c) => c.py_type(),
-            Self::Function(_) => "function",
+            Self::Function(_) | Self::ExtFunction(_) => "function",
             Self::Ref(id) => match heap {
                 Some(heap) => heap.get(*id).py_type(Some(heap)),
                 None => "object",
@@ -234,8 +236,8 @@ impl PyTrait for Value {
             Self::Float(f) => *f != 0.0,
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
-            Self::Builtin(_) => true,  // Builtinss are always truthy
-            Self::Function(_) => true, // same
+            Self::Builtin(_) => true,                         // Builtinss are always truthy
+            Self::Function(_) | Self::ExtFunction(_) => true, // same
             Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
             Self::InternBytes(bytes_id) => !interns.get_bytes(*bytes_id).is_empty(),
             Self::Ref(id) => heap.get(*id).py_bool(heap, interns),
@@ -270,6 +272,9 @@ impl PyTrait for Value {
             Self::Exc(exc) => exc.py_repr_fmt(f),
             Self::Builtin(b) => b.py_repr_fmt(f),
             Self::Function(f_id) => interns.get_function(*f_id).py_repr_fmt(f, interns, 0),
+            Self::ExtFunction(f_id) => {
+                write!(f, "<function '{}' external>", interns.get_external_function_name(*f_id))
+            }
             Self::InternString(string_id) => string_repr_fmt(interns.get_str(*string_id), f),
             Self::InternBytes(bytes_id) => bytes_repr_fmt(interns.get_bytes(*bytes_id), f),
             Self::Ref(id) => {
@@ -859,6 +864,7 @@ impl Value {
             Self::Exc(e) => exc_value_id(e),
             Self::Builtin(c) => builtin_value_id(*c),
             Self::Function(f_id) => function_value_id(*f_id),
+            Self::ExtFunction(f_id) => ext_function_value_id(*f_id),
             #[cfg(feature = "dec-ref-check")]
             Self::Dereferenced => panic!("Cannot get id of Dereferenced object"),
         }
@@ -923,10 +929,18 @@ impl Value {
                 }
                 Some(hasher.finish())
             }
-            Self::Function(f) => {
+            Self::Function(f_id) => {
                 // Hash based on function ID
                 let mut hasher = DefaultHasher::new();
-                f.hash(&mut hasher);
+                "function".hash(&mut hasher);
+                f_id.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::ExtFunction(f_id) => {
+                // Hash based on function ID
+                let mut hasher = DefaultHasher::new();
+                "ext-function".hash(&mut hasher);
+                f_id.hash(&mut hasher);
                 Some(hasher.finish())
             }
             Self::InternString(string_id) => {
@@ -1033,23 +1047,12 @@ impl Value {
     ///
     /// This method should only be called by `clone_with_heap()` for immediate values.
     /// Attempting to clone a Ref variant will panic.
-    fn clone_immediate(&self) -> Self {
+    pub fn clone_immediate(&self) -> Self {
         match self {
-            Self::Undefined => Self::Undefined,
-            Self::Ellipsis => Self::Ellipsis,
-            Self::None => Self::None,
-            Self::Bool(b) => Self::Bool(*b),
-            Self::Int(v) => Self::Int(*v),
-            Self::Float(v) => Self::Float(*v),
-            Self::Range(v) => Self::Range(*v),
-            Self::Exc(e) => Self::Exc(e.clone()),
-            Self::Builtin(b) => Self::Builtin(*b),
-            Self::Function(f) => Self::Function(*f),
-            Self::InternString(s) => Self::InternString(*s),
-            Self::InternBytes(b) => Self::InternBytes(*b),
             Self::Ref(_) => panic!("Ref clones must go through clone_with_heap to maintain refcounts"),
             #[cfg(feature = "dec-ref-check")]
             Self::Dereferenced => panic!("Cannot clone Dereferenced object"),
+            _ => self.copy_for_extend(),
         }
     }
 
@@ -1076,6 +1079,7 @@ impl Value {
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Builtin(b) => Self::Builtin(*b),
             Self::Function(f) => Self::Function(*f),
+            Self::ExtFunction(f) => Self::ExtFunction(*f),
             Self::InternString(s) => Self::InternString(*s),
             Self::InternBytes(b) => Self::InternBytes(*b),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
@@ -1184,6 +1188,8 @@ const EXC_ID_TAG: usize = 1usize << (usize::BITS - 8);
 const BUILTIN_ID_TAG: usize = 1usize << (usize::BITS - 9);
 /// High-bit tag for Function value-based IDs.
 const FUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 10);
+/// High-bit tag for External Function value-based IDs.
+const EXTFUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 11);
 
 /// Masks for value-based ID tags (keep bits below the tag bit).
 const INT_ID_MASK: usize = INT_ID_TAG - 1;
@@ -1192,6 +1198,7 @@ const RANGE_ID_MASK: usize = RANGE_ID_TAG - 1;
 const EXC_ID_MASK: usize = EXC_ID_TAG - 1;
 const BUILTIN_ID_MASK: usize = BUILTIN_ID_TAG - 1;
 const FUNCTION_ID_MASK: usize = FUNCTION_ID_TAG - 1;
+const EXTFUNCTION_ID_MASK: usize = EXTFUNCTION_ID_TAG - 1;
 
 /// Enumerates singleton literal slots so we can issue stable `id()` values without heap allocation.
 #[repr(usize)]
@@ -1261,10 +1268,16 @@ fn builtin_value_id(b: Builtins) -> usize {
     BUILTIN_ID_TAG | (hasher.finish() as usize & BUILTIN_ID_MASK)
 }
 
-/// Computes a deterministic ID for a function based on its discriminant.
+/// Computes a deterministic ID for a function based on its id.
 #[inline]
 fn function_value_id(f_id: FunctionId) -> usize {
     FUNCTION_ID_TAG | (f_id.index() & FUNCTION_ID_MASK)
+}
+
+/// Computes a deterministic ID for an external function based on its id.
+#[inline]
+fn ext_function_value_id(f_id: ExtFunctionId) -> usize {
+    EXTFUNCTION_ID_TAG | (f_id.index() & EXTFUNCTION_ID_MASK)
 }
 
 /// Converts an i64 repeat count to usize, handling negative values and overflow.

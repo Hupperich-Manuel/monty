@@ -35,7 +35,7 @@ impl Tuple {
     /// Note: This does NOT increment reference counts - the caller must
     /// ensure refcounts are properly managed.
     #[must_use]
-    pub fn from_vec(vec: Vec<Value>) -> Self {
+    pub fn new(vec: Vec<Value>) -> Self {
         Self(vec)
     }
 
@@ -54,12 +54,6 @@ impl Tuple {
     pub fn clone_with_heap<T: ResourceTracker>(&self, heap: &mut Heap<T>) -> Self {
         let cloned: Vec<Value> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         Self(cloned)
-    }
-}
-
-impl From<Vec<Value>> for Tuple {
-    fn from(vec: Vec<Value>) -> Self {
-        Self(vec)
     }
 }
 

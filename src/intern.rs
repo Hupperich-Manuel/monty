@@ -51,7 +51,23 @@ pub struct FunctionId(u32);
 
 impl FunctionId {
     pub fn new(index: usize) -> Self {
-        FunctionId(index.try_into().expect("Invalid namespace id"))
+        Self(index.try_into().expect("Invalid function id"))
+    }
+
+    /// Returns the raw index value.
+    #[inline]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Unique identifier for external functions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtFunctionId(u32);
+
+impl ExtFunctionId {
+    pub fn new(index: usize) -> Self {
+        Self(index.try_into().expect("Invalid external function id"))
     }
 
     /// Returns the raw index value.
@@ -76,7 +92,7 @@ pub struct InternerBuilder {
     /// Maps strings to their indices for deduplication during interning.
     map: AHashMap<String, StringId>,
     /// Storage for interned interns, indexed by `StringId`.
-    interns: Vec<String>,
+    strings: Vec<String>,
     /// Storage for interned bytes literals, indexed by `BytesId`.
     /// Not deduplicated since bytes literals are rare.
     bytes: Vec<Vec<u8>>,
@@ -99,8 +115,8 @@ impl InternerBuilder {
         if let Some(&id) = self.map.get(s) {
             return id;
         }
-        let id = StringId(self.interns.len().try_into().expect("StringId overflow"));
-        self.interns.push(s.to_owned());
+        let id = StringId(self.strings.len().try_into().expect("StringId overflow"));
+        self.strings.push(s.to_owned());
         self.map.insert(s.to_owned(), id);
         id
     }
@@ -120,8 +136,8 @@ impl InternerBuilder {
     ///
     /// Panics if the `StringId` is invalid (not from this interner).
     #[inline]
-    pub fn get(&self, id: StringId) -> &str {
-        &self.interns[id.index()]
+    pub fn get_str(&self, id: StringId) -> &str {
+        &self.strings[id.index()]
     }
 
     /// Looks up bytes by their `BytesId`.
@@ -138,7 +154,7 @@ impl InternerBuilder {
     ///
     /// This is used when transferring ownership to the `Executor`.
     pub fn into_storage(self) -> (Vec<String>, Vec<Vec<u8>>) {
-        (self.interns, self.bytes)
+        (self.strings, self.bytes)
     }
 }
 
@@ -150,14 +166,16 @@ pub struct Interns {
     strings: Vec<String>,
     bytes: Vec<Vec<u8>>,
     functions: Vec<Function>,
+    external_functions: Vec<String>,
 }
 
 impl Interns {
-    pub fn new(interner: InternerBuilder, functions: Vec<Function>) -> Self {
+    pub fn new(interner: InternerBuilder, functions: Vec<Function>, external_functions: Vec<String>) -> Self {
         Self {
-            strings: interner.interns,
+            strings: interner.strings,
             bytes: interner.bytes,
             functions,
+            external_functions,
         }
     }
 
@@ -189,5 +207,18 @@ impl Interns {
     #[inline]
     pub fn get_function(&self, id: FunctionId) -> &Function {
         self.functions.get(id.index()).expect("Function not found")
+    }
+
+    /// Lookup an external function name by its `ExtFunctionId`
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `ExtFunctionId` is invalid.
+    #[inline]
+    pub fn get_external_function_name(&self, id: ExtFunctionId) -> String {
+        self.external_functions
+            .get(id.index())
+            .expect("External function not found")
+            .clone()
     }
 }

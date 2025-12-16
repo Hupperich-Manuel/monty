@@ -66,4 +66,4 @@ profile: ## Profile the code with pprof and generate flamegraphs
 	uv run scripts/flamegraph_to_text.py
 
 .PHONY: all
-all: lint test
+all: lint test test-ref-counting

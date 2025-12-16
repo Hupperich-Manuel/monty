@@ -22,7 +22,10 @@ mod types;
 mod value;
 
 pub use crate::exceptions::RunError;
-pub use crate::executor::{ExecProgress, Executor, ExecutorIter, YieldExecutorState};
+pub use crate::executor::{ExecProgress, Executor, ExecutorIter, FunctionCallExecutorState};
 pub use crate::object::{InvalidInputError, PyObject};
 pub use crate::parse_error::ParseError;
 pub use crate::resource::{LimitedTracker, NoLimitTracker, ResourceLimits, ResourceTracker};
+
+#[cfg(feature = "ref-counting")]
+pub use crate::executor::RefCountOutput;

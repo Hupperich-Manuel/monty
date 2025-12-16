@@ -6,7 +6,7 @@
 
 use std::str::FromStr;
 
-use crate::evaluate::EvaluateExpr;
+use crate::evaluate::{return_ext_call, EvalResult, EvaluateExpr};
 use crate::exceptions::{exc_fmt, ExcType};
 use crate::expressions::ExprLoc;
 
@@ -276,7 +276,7 @@ pub(crate) fn fstring_interpolation<T: ResourceTracker>(
     value: &Value,
     conversion: ConversionFlag,
     format_spec: Option<&FormatSpec>,
-) -> RunResult<()> {
+) -> RunResult<EvalResult<()>> {
     // 1. Get the value type for format spec validation
     // When a conversion flag is used (!s, !r, !a), the result is always a string,
     // so we should validate against String type, not the original value type.
@@ -299,7 +299,7 @@ pub(crate) fn fstring_interpolation<T: ResourceTracker>(
             }
             FormatSpec::Dynamic(parts) => {
                 // Evaluate dynamic parts, then parse
-                let spec_str = evaluate_dynamic_format_spec(evaluator, parts)?;
+                let spec_str = return_ext_call!(evaluate_dynamic_format_spec(evaluator, parts)?);
                 if let Ok(parsed) = spec_str.parse() {
                     apply_format_spec(result, &converted, &parsed, value_type)?;
                 } else {
@@ -311,7 +311,7 @@ pub(crate) fn fstring_interpolation<T: ResourceTracker>(
         result.push_str(&converted);
     }
 
-    Ok(())
+    Ok(EvalResult::Value(()))
 }
 
 /// Applies a conversion flag to a value, returning the string representation.
@@ -344,20 +344,20 @@ fn apply_conversion<T: ResourceTracker>(
 fn evaluate_dynamic_format_spec<T: ResourceTracker>(
     evaluator: &mut EvaluateExpr<'_, '_, T>,
     parts: &[FStringPart],
-) -> RunResult<String> {
+) -> RunResult<EvalResult<String>> {
     let mut result = String::new();
     for part in parts {
         match part {
             FStringPart::Literal(s) => result.push_str(s),
             FStringPart::Interpolation { expr, conversion, .. } => {
-                let value = evaluator.evaluate_use(expr)?;
+                let value = return_ext_call!(evaluator.evaluate_use(expr)?);
                 let converted = apply_conversion(&value, *conversion, evaluator.heap, evaluator.interns);
                 result.push_str(&converted);
                 value.drop_with_heap(evaluator.heap);
             }
         }
     }
-    Ok(result)
+    Ok(EvalResult::Value(result))
 }
 
 /// Creates a ValueError for an invalid format specifier.

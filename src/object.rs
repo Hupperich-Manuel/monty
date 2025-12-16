@@ -164,7 +164,7 @@ impl PyObject {
                     .into_iter()
                     .map(|item| item.to_value(heap, interns))
                     .collect::<Result<_, _>>()?;
-                Ok(Value::Ref(heap.allocate(HeapData::Tuple(Tuple::from_vec(values)))?))
+                Ok(Value::Ref(heap.allocate(HeapData::Tuple(Tuple::new(values)))?))
             }
             Self::Dict(map) => {
                 let pairs: Result<Vec<(Value, Value)>, InvalidInputError> = map

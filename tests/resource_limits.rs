@@ -184,22 +184,23 @@ len(result)
     ignore = "resource exhaustion doesn't guarantee heap state consistency"
 )]
 fn executor_iter_resource_limit_on_resume() {
-    // Test that resource limits are enforced across yields
-    // First yield succeeds, but resumed execution exceeds limit
-    let code = "yield 1\nx = []\nfor i in range(10):\n    x.append(str(i))\nlen(x)";
-    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+    // Test that resource limits are enforced across function calls
+    // First function call succeeds, but resumed execution exceeds limit
+    let code = "foo(1)\nx = []\nfor i in range(10):\n    x.append(str(i))\nlen(x)";
+    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned()]).unwrap();
 
-    // First yield should succeed with generous limit
+    // First function call should succeed with generous limit
     let limits = ResourceLimits::new().max_allocations(5);
-    let (value, state) = exec
+    let (name, args, state) = exec
         .run_with_limits(vec![], limits)
         .unwrap()
-        .into_yield()
-        .expect("yield");
-    assert_eq!(value, PyObject::Int(1));
+        .into_function_call()
+        .expect("function call");
+    assert_eq!(name, "foo");
+    assert_eq!(args, vec![PyObject::Int(1)]);
 
     // Resume - should fail due to allocation limit during the for loop
-    let result = state.run();
+    let result = state.run(PyObject::None);
     assert!(result.is_err(), "should exceed allocation limit on resume");
     match result.unwrap_err() {
         RunError::Resource(err) => {
@@ -218,16 +219,16 @@ fn executor_iter_resource_limit_on_resume() {
     feature = "dec-ref-check",
     ignore = "resource exhaustion doesn't guarantee heap state consistency"
 )]
-fn executor_iter_resource_limit_before_yield() {
-    // Test that resource limits are enforced before first yield
-    let code = "x = []\nfor i in range(10):\n    x.append(str(i))\nyield len(x)\n42";
-    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+fn executor_iter_resource_limit_before_function_call() {
+    // Test that resource limits are enforced before first function call
+    let code = "x = []\nfor i in range(10):\n    x.append(str(i))\nfoo(len(x))\n42";
+    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned()]).unwrap();
 
-    // Should fail before reaching the yield
+    // Should fail before reaching the function call
     let limits = ResourceLimits::new().max_allocations(3);
     let result = exec.run_with_limits(vec![], limits);
 
-    assert!(result.is_err(), "should exceed allocation limit before yield");
+    assert!(result.is_err(), "should exceed allocation limit before function call");
     match result.unwrap_err() {
         RunError::Resource(err) => {
             let msg = err.to_string();
@@ -241,27 +242,44 @@ fn executor_iter_resource_limit_before_yield() {
 }
 
 #[test]
-fn executor_iter_resource_limit_multiple_yields() {
-    // Test resource limits across multiple yields
-    let code = "yield 1\nyield 2\nyield 3\n4";
-    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+fn executor_iter_resource_limit_multiple_function_calls() {
+    // Test resource limits across multiple function calls
+    let code = "foo(1)\nbar(2)\nbaz(3)\n4";
+    let exec = ExecutorIter::new(
+        code,
+        "test.py",
+        &[],
+        vec!["foo".to_owned(), "bar".to_owned(), "baz".to_owned()],
+    )
+    .unwrap();
 
-    // Very tight allocation limit - should still work for simple yields
+    // Very tight allocation limit - should still work for simple function calls
     let limits = ResourceLimits::new().max_allocations(100);
 
-    let (value, state) = exec
+    let (name, args, state) = exec
         .run_with_limits(vec![], limits)
         .unwrap()
-        .into_yield()
-        .expect("first yield");
-    assert_eq!(value, PyObject::Int(1));
+        .into_function_call()
+        .expect("first call");
+    assert_eq!(name, "foo");
+    assert_eq!(args, vec![PyObject::Int(1)]);
 
-    let (value, state) = state.run().unwrap().into_yield().expect("second yield");
-    assert_eq!(value, PyObject::Int(2));
+    let (name, args, state) = state
+        .run(PyObject::None)
+        .unwrap()
+        .into_function_call()
+        .expect("second call");
+    assert_eq!(name, "bar");
+    assert_eq!(args, vec![PyObject::Int(2)]);
 
-    let (value, state) = state.run().unwrap().into_yield().expect("third yield");
-    assert_eq!(value, PyObject::Int(3));
+    let (name, args, state) = state
+        .run(PyObject::None)
+        .unwrap()
+        .into_function_call()
+        .expect("third call");
+    assert_eq!(name, "baz");
+    assert_eq!(args, vec![PyObject::Int(3)]);
 
-    let result = state.run().unwrap().into_complete().expect("complete");
+    let result = state.run(PyObject::None).unwrap().into_complete().expect("complete");
     assert_eq!(result, PyObject::Int(4));
 }

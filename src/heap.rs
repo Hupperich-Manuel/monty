@@ -891,7 +891,7 @@ impl<T: ResourceTracker> Heap<T> {
                 if count == 0 {
                     restore_data!(self, id, data, "mult_sequence");
                     Ok(Some(Value::Ref(
-                        self.allocate(HeapData::Tuple(Tuple::from_vec(Vec::new())))?,
+                        self.allocate(HeapData::Tuple(Tuple::new(Vec::new())))?,
                     )))
                 } else {
                     // Copy items and track which refs need incrementing
@@ -927,9 +927,7 @@ impl<T: ResourceTracker> Heap<T> {
                     // Manually forget the items vec to avoid Drop panic
                     std::mem::forget(items);
 
-                    Ok(Some(Value::Ref(
-                        self.allocate(HeapData::Tuple(Tuple::from_vec(result)))?,
-                    )))
+                    Ok(Some(Value::Ref(self.allocate(HeapData::Tuple(Tuple::new(result)))?)))
                 }
             }
             _ => {

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::exceptions::{ExceptionRaise, InternalRunError, RunError};
+use crate::exceptions::{ExceptionRaise, InternalRunError};
 use crate::resource::ResourceError;
 
 /// Errors that can occur during parsing or preparation of Python code.
@@ -27,16 +27,6 @@ impl fmt::Display for ParseError {
             Self::PreEvalExc(exc) => write!(f, "{}", exc.py_str()),
             Self::PreEvalInternal(s) => write!(f, "Internal error: {s}"),
             Self::PreEvalResource(s) => write!(f, "Resource error: {s}"),
-        }
-    }
-}
-
-impl From<RunError> for ParseError {
-    fn from(run_error: RunError) -> Self {
-        match run_error {
-            RunError::Exc(e) => Self::PreEvalExc(e),
-            RunError::Internal(e) => Self::PreEvalInternal(e),
-            RunError::Resource(e) => Self::PreEvalResource(e),
         }
     }
 }
