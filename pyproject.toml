@@ -19,8 +19,8 @@ dev = [
 line-length = 120
 include = [
     "scripts/**/*.py",
-    "crates/monty/test_cases/**/*.py",
-    "crates/monty-python/**/*.py",
+    "crates/**/*.py",
+    "crates/**/*.pyi",
 ]
 # Exclude files with intentional syntax errors (used for testing parse error handling)
 extend-exclude = [
@@ -55,6 +55,10 @@ known-first-party = ["monty"]
     "F821", # traceback undefined call test intentionally uses undefined name
     "F841", # unused variable - needed for testing exception variable cleanup
 ]
+"crates/monty-typeshed/vendor/typeshed/stdlib/**/*.pyi" = [
+    "F403", # unable to detect undefined names
+    "F821", # Undefined name
+]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -64,7 +68,8 @@ quote-style = "single"
 pythonVersion = "3.14"
 typeCheckingMode = "strict"
 reportUnnecessaryTypeIgnoreComment = true
-include = ["scripts", "crates/monty/test_cases", "crates/monty-python"]
+include = ["scripts", "crates/monty/test_cases", "crates/monty-python", "crates/monty-type-checking"]
+exclude = ["crates/monty-type-checking/tests/bad_types.py"]
 venv = ".venv"
 
 # we include tests cases in type checking then switch off all rules that break
@@ -95,9 +100,14 @@ reportAttributeAccessIssue = false
 # unused variables are fine
 reportUnusedVariable = false
 
+[[tool.pyright.executionEnvironments]]
+root = "crates/monty-type-checking"
+reportUnnecessaryIsInstance = false
+
 [tool.codespell]
 # Ref: https://github.com/codespell-project/codespell#using-a-config-file
 ignore-words-list = 'crate,NotIn,ser'
+skip = ["crates/monty-typeshed/vendor/typeshed/stdlib/*", "Cargo.lock"]
 
 [tool.inline-snapshot]
 format-command="ruff format --stdin-filename {filename}"

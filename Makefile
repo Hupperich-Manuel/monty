@@ -83,6 +83,10 @@ test-ref-count-return: ## Run rust tests with ref-count-return enabled
 test-cases: ## Run tests cases only
 	cargo test -p monty --test datatest_runner
 
+.PHONY: test-type-checking
+test-type-checking: ## Run rust tests on monty_type_checking
+	cargo test -p monty_type_checking -p monty_typeshed
+
 .PHONY: run-pytest
 run-pytest: ## Run Python tests with pytest
 	uv run --package monty-python --only-dev pytest crates/monty-python/tests
@@ -101,6 +105,12 @@ test: test-ref-count-panic test-ref-count-return test-no-features test-py ## Run
 .PHONY: complete-tests
 complete-tests: ## Fill in incomplete test expectations using CPython
 	uv run scripts/complete_tests.py
+
+.PHONY: update-typeshed
+update-typeshed: ## Update vendored typeshed from upstream
+	uv run crates/monty-typeshed/update.py
+	uv run ruff format
+	uv run ruff check --fix --fix-only --silent
 
 .PHONY: bench
 bench: ## Run benchmarks

@@ -1,12 +1,13 @@
 use std::{env, fs, process::ExitCode, time::Instant};
 
 use monty::{MontyObject, MontyRun, NoLimitTracker, RunProgress, StdPrint};
+use monty_type_checking::type_check;
 
 const EXT_FUNCTIONS: bool = false;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let file_path = if args.len() > 1 { &args[1] } else { "monty.py" };
+    let file_path = if args.len() > 1 { &args[1] } else { "example.py" };
     let code = match read_file(file_path) {
         Ok(code) => code,
         Err(err) => {
@@ -14,6 +15,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    let start = Instant::now();
+    if let Some(failure) = type_check(&code, file_path).unwrap() {
+        eprintln!("type checking failed: {failure}");
+    } else {
+        eprintln!("type checking succeeded");
+    }
+    let elapsed = start.elapsed();
+    println!("time taken to run typing: {elapsed:?}");
+
     let input_names = vec![];
     let inputs = vec![];
     let ext_functions = vec!["add_ints".to_owned()];

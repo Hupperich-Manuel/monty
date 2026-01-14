@@ -10,48 +10,83 @@ __all__ = [
     'MontyError',
     'MontySyntaxError',
     'MontyRuntimeError',
+    'MontyTypingError',
     'Frame',
 ]
 
 class MontyError(Exception):
     """Base exception for all Monty interpreter errors.
 
-    Catching `MontyError` will catch both syntax and runtime errors from Monty.
+    Catching `MontyError` will catch syntax, runtime, and typing errors from Monty.
     This exception is raised internally by Monty and cannot be constructed directly.
     """
 
     def exception(self) -> BaseException:
         """Returns the inner exception as a Python exception object."""
 
-    def display(self, show: Literal['traceback', 'type-msg', 'msg'] = 'traceback') -> str:
-        """Returns formatted exception string.
-
-        Args:
-            show: 'traceback' - full traceback with exception
-                  'type-msg' - 'ExceptionType: message' format
-                  'msg' - just the message
-        """
-
     def __str__(self) -> str:
-        """Returns display('msg'), just the exception message."""
+        """Returns the exception message."""
 
 @final
 class MontySyntaxError(MontyError):
     """Raised when Python code has syntax errors or cannot be parsed by Monty.
 
-    Inherits exception(), display(), __str__() from MontyError.
+    Inherits exception(), __str__() from MontyError.
     """
+
+    def display(self, format: Literal['type-msg', 'msg'] = 'msg') -> str:
+        """Returns formatted exception string.
+
+        Args:
+            format: 'type-msg' - 'ExceptionType: message' format
+                  'msg' - just the message
+        """
+
+@final
+class MontyTypingError(MontyError):
+    """Raised when type checking finds errors in the code.
+
+    This exception is raised when static type analysis detects type errors
+    before execution. Use `.display(format, color)` to render the diagnostics
+    in different formats.
+
+    Inherits exception(), __str__() from MontyError.
+    Cannot be constructed directly from Python.
+    """
+
+    def display(
+        self,
+        format: Literal[
+            'full', 'concise', 'azure', 'json', 'jsonlines', 'rdjson', 'pylint', 'gitlab', 'github'
+        ] = 'full',
+        color: bool = False,
+    ) -> str:
+        """Renders the type error diagnostics with the specified format and color.
+
+        Args:
+            format: Output format for the diagnostics. Defaults to 'full'.
+            color: Whether to include ANSI color codes. Defaults to False.
+        """
 
 @final
 class MontyRuntimeError(MontyError):
     """Raised when Monty code fails during execution.
 
-    Inherits exception(), display(), __str__() from MontyError.
-    Additionally provides traceback() for runtime errors.
+    Inherits exception(), __str__() from MontyError.
+    Additionally provides traceback() and display() methods.
     """
 
     def traceback(self) -> list[Frame]:
         """Returns the Monty traceback as a list of Frame objects."""
+
+    def display(self, format: Literal['traceback', 'type-msg', 'msg'] = 'traceback') -> str:
+        """Returns formatted exception string.
+
+        Args:
+            format: 'traceback' - full traceback with exception
+                  'type-msg' - 'ExceptionType: message' format
+                  'msg' - just the message
+        """
 
 @final
 class Frame:
@@ -117,6 +152,23 @@ class Monty:
 
         Raises:
             MontySyntaxError: If the code cannot be parsed
+        """
+
+    def type_check(self, prefix_code: str | None = None) -> None:
+        """
+        Perform static type checking on the code.
+
+        Analyzes the code for type errors without executing it. This uses
+        a subset of Python's type system supported by Monty.
+
+        Arguments:
+            prefix_code: Optional code to prepend before type checking,
+                e.g. with input variable declarations or external function signatures.
+
+        Raises:
+            MontyTypingError: If type errors are found. Use `.display(format, color)`
+                on the exception to render the diagnostics in different formats.
+            RuntimeError: If the type checking infrastructure fails internally.
         """
 
     def run(

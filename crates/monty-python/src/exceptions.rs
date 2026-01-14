@@ -2,22 +2,24 @@
 //!
 //! Provides a hierarchy of exception types that wrap Monty's internal exceptions,
 //! preserving traceback information and allowing Python code to distinguish
-//! between syntax errors and runtime errors from Monty-executed code.
+//! between syntax errors, runtime errors, and type checking errors from Monty-executed code.
 //!
 //! ## Exception Hierarchy
 //!
 //! ```text
 //! MontyError(Exception)        # Base class for all Monty exceptions
 //! ├── MontySyntaxError         # Raised when syntax is invalid or Monty can't parse the code
-//! └── MontyRuntimeError        # Raised when code fails during execution
+//! ├── MontyRuntimeError        # Raised when code fails during execution
+//! └── MontyTypingError         # Raised when type checking finds errors in the code
 //! ```
 
 use ::monty::{ExcType, MontyException, StackFrame};
+use monty_type_checking::TypeCheckingFailure;
 use pyo3::{
-    exceptions,
+    exceptions::{self},
     prelude::*,
     types::{PyDict, PyList, PyString},
-    PyTypeCheck,
+    PyClassInitializer, PyTypeCheck,
 };
 
 use crate::dataclass::get_frozen_instance_error;
@@ -26,7 +28,7 @@ use crate::dataclass::get_frozen_instance_error;
 ///
 /// This is the parent class for both `MontySyntaxError` and `MontyRuntimeError`.
 /// Catching `MontyError` will catch any exception raised by Monty.
-#[pyclass(extends=pyo3::exceptions::PyException, module="monty", subclass)]
+#[pyclass(extends=exceptions::PyException, module="monty", subclass)]
 #[derive(Clone)]
 pub struct MontyError {
     /// The underlying Monty exception.
@@ -79,23 +81,6 @@ impl MontyError {
         py_err.into_value(py).into_any()
     }
 
-    /// Returns formatted exception string.
-    ///
-    /// Args:
-    ///     show: 'traceback' - full traceback with exception (same as 'type-msg' for base class)
-    ///           'type-msg' - 'ExceptionType: message' format
-    ///           'msg' - just the message
-    #[pyo3(signature = (show = "traceback"))]
-    fn display(&self, show: &str) -> PyResult<String> {
-        match show {
-            "traceback" | "type-msg" => Ok(self.exc.summary()),
-            "msg" => Ok(self.message().unwrap_or_default().to_string()),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid display mode: '{show}'. Expected 'traceback', 'type-msg', or 'msg'"
-            ))),
-        }
-    }
-
     fn __str__(&self) -> String {
         self.message().unwrap_or_default().to_string()
     }
@@ -132,6 +117,24 @@ impl MontySyntaxError {
 
 #[pymethods]
 impl MontySyntaxError {
+    /// Returns formatted exception string.
+    ///
+    /// Args:
+    ///     format: 'type-msg' - 'ExceptionType: message' format
+    ///             'msg' - just the message
+    #[pyo3(signature = (format = "msg"))]
+    #[expect(clippy::needless_pass_by_value, reason = "required by macro")]
+    fn display(slf: PyRef<'_, Self>, format: &str) -> PyResult<String> {
+        let parent = slf.as_super();
+        match format {
+            "msg" => Ok(parent.message().unwrap_or_default().to_string()),
+            "type-msg" => Ok(parent.exc.summary()),
+            _ => Err(exceptions::PyValueError::new_err(format!(
+                "Invalid display format: '{format}'. Expected 'type-msg', or 'msg'"
+            ))),
+        }
+    }
+
     #[expect(clippy::needless_pass_by_value, reason = "required by macro")]
     fn __repr__(slf: PyRef<'_, Self>) -> String {
         let parent = slf.as_super();
@@ -140,6 +143,56 @@ impl MontySyntaxError {
         } else {
             "MontySyntaxError()".to_string()
         }
+    }
+}
+
+/// Raised when type checking finds errors in the code.
+///
+/// Inherits from `MontyError`. This exception is raised when static type
+/// analysis detects type errors. Stores the `TypeCheckingFailure` so diagnostics
+/// can be re-rendered with different format/color settings via `display()`.
+#[pyclass(extends=MontyError, module="monty", unsendable)]
+pub struct MontyTypingError {
+    failure: TypeCheckingFailure,
+}
+
+impl MontyTypingError {
+    /// Creates a `MontyTypingError` from a `TypeCheckingFailure`.
+    #[must_use]
+    pub fn new_err(py: Python<'_>, failure: TypeCheckingFailure) -> PyErr {
+        // we need a MontyException to create the base, but it shouldn't be visible anywhere
+        let base = MontyError::new(MontyException::new(ExcType::TypeError, None));
+        let init = PyClassInitializer::from(base).add_subclass(Self { failure });
+        match Py::new(py, init) {
+            Ok(err) => PyErr::from_value(err.into_bound(py).into_any()),
+            Err(e) => e,
+        }
+    }
+}
+
+#[pymethods]
+impl MontyTypingError {
+    /// Renders the type error diagnostics with the specified format and color.
+    ///
+    /// Args:
+    ///     format: Output format
+    ///     color: Whether to include ANSI color codes in the output.
+    #[pyo3(signature = (format = "full", color = false))]
+    fn display(&self, format: &str, color: bool) -> PyResult<String> {
+        self.failure
+            .clone()
+            .color(color)
+            .format_from_str(format)
+            .map_err(exceptions::PyValueError::new_err)
+            .map(|f| f.to_string())
+    }
+
+    fn __str__(&self) -> String {
+        self.failure.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MontyTypingError({})", self.failure)
     }
 }
 
@@ -192,16 +245,16 @@ impl MontyRuntimeError {
 
     /// Returns formatted exception string.
     ///
-    /// Overrides the base class to provide the full traceback when show='traceback'.
-    #[pyo3(signature = (show = "traceback"))]
+    /// Overrides the base class to provide the full traceback when format='traceback'.
+    #[pyo3(signature = (format = "traceback"))]
     #[expect(clippy::needless_pass_by_value, reason = "required by macro")]
-    fn display(slf: PyRef<'_, Self>, show: &str) -> PyResult<String> {
-        match show {
+    fn display(slf: PyRef<'_, Self>, format: &str) -> PyResult<String> {
+        match format {
             "traceback" => Ok(slf.as_super().exc.to_string()),
             "type-msg" => Ok(slf.as_super().exc.summary()),
             "msg" => Ok(slf.as_super().message().unwrap_or_default().to_string()),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid display mode: '{show}'. Expected 'traceback', 'type-msg', or 'msg'"
+            _ => Err(exceptions::PyValueError::new_err(format!(
+                "Invalid display format: '{format}'. Expected 'traceback', 'type-msg', or 'msg'"
             ))),
         }
     }
@@ -291,10 +344,6 @@ impl PyFrame {
         }
     }
 }
-
-// ============================================================================
-// Helper functions
-// ============================================================================
 
 /// Converts Monty's `MontyException` to the matching Python exception value.
 ///
